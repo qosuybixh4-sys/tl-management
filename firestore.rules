@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 테스트 기간: 모든 읽기/쓰기 허용 (30일)
+    // 운영 전환 시 아래 주석 처리된 규칙으로 교체 권장
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
