@@ -6,11 +6,12 @@ import {
 import { db } from "./firebase";
 import "./App.css";
 
-// ── 초기 시스템 계정 (Firestore에 없으면 자동 생성) ──────────────────────
 const SYSTEM_ACCOUNTS = [
   { id: "소장", pw: "1234", role: "sojangnm", label: "소장" },
   { id: "관리자", pw: "1234", role: "admin", label: "관리자" },
 ];
+
+const TL_SPECS = ["7.8m급", "10m급", "12m급", "기타"];
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
@@ -21,19 +22,14 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("");
   const [loading, setLoading] = useState(true);
 
-  // ── 자동 로그인 ────────────────────────────────────────────────────────
   useEffect(() => {
     const saved = localStorage.getItem("tl_user");
-    if (saved) {
-      try { setCurrentUser(JSON.parse(saved)); } catch {}
-    }
+    if (saved) { try { setCurrentUser(JSON.parse(saved)); } catch {} }
   }, []);
 
-  // ── Firestore 실시간 구독 ──────────────────────────────────────────────
   useEffect(() => {
     const unsubAccounts = onSnapshot(collection(db, "accounts"), snap => {
-      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      setAccounts(data);
+      setAccounts(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     });
     const unsubTeams = onSnapshot(collection(db, "teams"), snap => {
       setTeams(snap.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -45,24 +41,34 @@ export default function App() {
       query(collection(db, "approvals"), orderBy("createdAt", "desc")),
       snap => setApprovals(snap.docs.map(d => ({ id: d.id, ...d.data() })))
     );
-
     initSystemAccounts().then(() => setLoading(false));
-
     return () => { unsubAccounts(); unsubTeams(); unsubTls(); unsubApprovals(); };
   }, []);
 
-  // ── 시스템 계정 초기화 ────────────────────────────────────────────────
+  // 일별 히스토리 자동 저장 (하루 1회)
+  useEffect(() => {
+    if (tls.length === 0 || teams.length === 0) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const key = `tl_snapshot_${today}`;
+    if (localStorage.getItem(key)) return;
+    const snapshot = teams.map(team => ({
+      team: team.name,
+      total: tls.filter(t => t.team === team.name).length,
+      used: tls.filter(t => t.team === team.name && t.todayUse).length,
+    }));
+    setDoc(doc(db, "history", today), { date: today, data: snapshot, savedAt: serverTimestamp() });
+    localStorage.setItem(key, "1");
+  }, [tls, teams]);
+
   async function initSystemAccounts() {
+    const snap = await getDocs(collection(db, "accounts"));
     for (const acc of SYSTEM_ACCOUNTS) {
-      const ref = doc(db, "accounts", acc.id);
-      const snap = await getDocs(collection(db, "accounts"));
       if (!snap.docs.find(d => d.id === acc.id)) {
-        await setDoc(ref, { pw: acc.pw, role: acc.role, label: acc.label });
+        await setDoc(doc(db, "accounts", acc.id), { pw: acc.pw, role: acc.role, label: acc.label });
       }
     }
   }
 
-  // ── 로그인 ────────────────────────────────────────────────────────────
   async function doLogin(teamId, pw) {
     const acc = accounts.find(a => a.id === teamId);
     if (!acc) return "존재하지 않는 계정입니다.";
@@ -70,8 +76,7 @@ export default function App() {
     const user = { id: teamId, role: acc.role, label: acc.label || teamId, team: acc.team || null };
     setCurrentUser(user);
     localStorage.setItem("tl_user", JSON.stringify(user));
-    const nav = NAV_TABS[acc.role];
-    setActiveTab(nav[0].id);
+    setActiveTab(NAV_TABS[acc.role][0].id);
     return null;
   }
 
@@ -81,7 +86,6 @@ export default function App() {
     setActiveTab("");
   }
 
-  // ── 팀 CRUD ──────────────────────────────────────────────────────────
   async function addTeam(name, leader, pw) {
     if (!name || !pw) return "팀 이름과 비밀번호를 입력해주세요.";
     if (accounts.find(a => a.id === name)) return "이미 존재하는 이름입니다.";
@@ -93,9 +97,10 @@ export default function App() {
   async function editTeam(oldName, newName, leader, pw) {
     if (!newName) return "팀 이름을 입력해주세요.";
     if (oldName !== newName) {
-      await setDoc(doc(db, "teams", newName), { name: newName, leader, pw: pw || teams.find(t=>t.id===oldName)?.pw });
+      const oldPw = pw || teams.find(t => t.id === oldName)?.pw;
+      await setDoc(doc(db, "teams", newName), { name: newName, leader, pw: oldPw });
       await deleteDoc(doc(db, "teams", oldName));
-      await setDoc(doc(db, "accounts", newName), { pw: pw || accounts.find(a=>a.id===oldName)?.pw, role:"team", label:newName, team:newName });
+      await setDoc(doc(db, "accounts", newName), { pw: oldPw, role: "team", label: newName, team: newName });
       await deleteDoc(doc(db, "accounts", oldName));
       for (const tl of tls.filter(t => t.team === oldName)) {
         await updateDoc(doc(db, "tls", tl.id), { team: newName });
@@ -117,17 +122,16 @@ export default function App() {
     }
   }
 
-  // ── TL CRUD ──────────────────────────────────────────────────────────
   async function addTL(data) {
     await addDoc(collection(db, "tls"), { ...data, todayUse: false, todayPurpose: "", createdAt: serverTimestamp() });
   }
 
-  async function deleteTL(id) {
-    await deleteDoc(doc(db, "tls", id));
+  async function updateTL(id, data) {
+    await updateDoc(doc(db, "tls", id), data);
   }
 
-  async function updateTLStatus(id, status) {
-    await updateDoc(doc(db, "tls", id), { status });
+  async function deleteTL(id) {
+    await deleteDoc(doc(db, "tls", id));
   }
 
   async function toggleTodayUse(id, current) {
@@ -138,7 +142,6 @@ export default function App() {
     await updateDoc(doc(db, "tls", id), { todayPurpose: purpose });
   }
 
-  // ── 결재 ─────────────────────────────────────────────────────────────
   async function submitApproval(data) {
     await addDoc(collection(db, "approvals"), { ...data, status: "대기", createdAt: serverTimestamp() });
   }
@@ -151,7 +154,6 @@ export default function App() {
     }
   }
 
-  // ── 비밀번호 변경 ─────────────────────────────────────────────────────
   async function changePassword(accountId, newPw) {
     await updateDoc(doc(db, "accounts", accountId), { pw: newPw });
     if (teams.find(t => t.id === accountId)) {
@@ -159,18 +161,14 @@ export default function App() {
     }
   }
 
-  // ── activeTab 초기화 ──────────────────────────────────────────────────
   useEffect(() => {
     if (currentUser && !activeTab) {
       setActiveTab(NAV_TABS[currentUser.role]?.[0]?.id || "");
     }
   }, [currentUser, accounts]);
 
-  if (loading) return <div className="splash"><div className="spinner"/><p>불러오는 중...</p></div>;
-
-  if (!currentUser) {
-    return <LoginScreen accounts={accounts} onLogin={doLogin} />;
-  }
+  if (loading) return <div className="splash"><div className="spinner" /><p>불러오는 중...</p></div>;
+  if (!currentUser) return <LoginScreen accounts={accounts} onLogin={doLogin} />;
 
   const navTabs = NAV_TABS[currentUser.role] || [];
 
@@ -192,28 +190,30 @@ export default function App() {
       </nav>
       <main className="content">
         {activeTab === "overview" && <OverviewScreen tls={tls} teams={teams} approvals={approvals} />}
-        {activeTab === "tl" && <TLScreen tls={tls} teams={teams} currentUser={currentUser} onAdd={addTL} onDelete={deleteTL} onStatusChange={updateTLStatus} />}
+        {activeTab === "tl" && <TLScreen tls={tls} teams={teams} currentUser={currentUser} onAdd={addTL} onUpdate={updateTL} onDelete={deleteTL} />}
         {activeTab === "today" && <TodayScreen tls={tls} currentUser={currentUser} onToggle={toggleTodayUse} onPurpose={setTodayPurpose} />}
-        {activeTab === "approval" && <ApprovalScreen approvals={approvals} tls={tls} onDecide={decideApproval} />}
+        {activeTab === "approval" && <ApprovalScreen approvals={approvals} onDecide={decideApproval} />}
         {activeTab === "request" && <RequestScreen tls={tls} teams={teams} currentUser={currentUser} onSubmit={submitApproval} approvals={approvals} />}
-        {activeTab === "teams" && <TeamsScreen teams={teams} tls={tls} accounts={accounts} onAdd={addTeam} onEdit={editTeam} onDelete={deleteTeam} onChangePw={changePassword} currentUser={currentUser} />}
+        {activeTab === "teams" && <TeamsScreen teams={teams} tls={tls} accounts={accounts} onAdd={addTeam} onEdit={editTeam} onDelete={deleteTeam} onChangePw={changePassword} />}
+        {activeTab === "history" && <HistoryScreen />}
       </main>
     </div>
   );
 }
 
-// ── 네비게이션 정의 ────────────────────────────────────────────────────────
 const NAV_TABS = {
   sojangnm: [
     { id: "overview", icon: "📊", label: "현황" },
     { id: "tl", icon: "🏗", label: "장비목록" },
     { id: "approval", icon: "✅", label: "결재" },
+    { id: "history", icon: "📈", label: "가동률" },
     { id: "teams", icon: "👥", label: "팀관리" },
   ],
   admin: [
     { id: "overview", icon: "📊", label: "현황" },
     { id: "tl", icon: "🏗", label: "장비목록" },
     { id: "today", icon: "📅", label: "금일사용" },
+    { id: "history", icon: "📈", label: "가동률" },
   ],
   team: [
     { id: "tl", icon: "🏗", label: "내 장비" },
@@ -222,7 +222,6 @@ const NAV_TABS = {
   ],
 };
 
-// ── 로그인 화면 ────────────────────────────────────────────────────────────
 function LoginScreen({ accounts, onLogin }) {
   const [teamId, setTeamId] = useState("");
   const [pw, setPw] = useState("");
@@ -254,9 +253,11 @@ function LoginScreen({ accounts, onLogin }) {
         <select value={teamId} onChange={e => { setTeamId(e.target.value); setErr(""); }}>
           <option value="">선택해주세요</option>
           {systemAccounts.map(a => <option key={a.id} value={a.id}>{a.label || a.id}</option>)}
-          {teamAccounts.length > 0 && <optgroup label="── 팀 ──">
-            {teamAccounts.map(a => <option key={a.id} value={a.id}>{a.id} (팀장)</option>)}
-          </optgroup>}
+          {teamAccounts.length > 0 && (
+            <optgroup label="── 팀 ──">
+              {teamAccounts.map(a => <option key={a.id} value={a.id}>{a.id} (팀장)</option>)}
+            </optgroup>
+          )}
         </select>
       </div>
       <div className="form-group">
@@ -271,7 +272,6 @@ function LoginScreen({ accounts, onLogin }) {
   );
 }
 
-// ── 현황 화면 ─────────────────────────────────────────────────────────────
 function OverviewScreen({ tls, teams, approvals }) {
   const total = tls.length;
   const todayUse = tls.filter(t => t.todayUse).length;
@@ -301,6 +301,7 @@ function OverviewScreen({ tls, teams, approvals }) {
               <div key={t.id} className="tl-row">
                 <span className={`dot dot-${t.status === "정상" ? "ok" : t.status === "고장" ? "broken" : "check"}`} />
                 <span className="tl-sn">{t.sn}</span>
+                {t.spec && <span className="pill pill-gray">{t.spec}</span>}
                 <span className="tl-meta">{t.location}</span>
                 {t.todayUse && <span className="pill pill-purple">사용중</span>}
               </div>
@@ -313,31 +314,79 @@ function OverviewScreen({ tls, teams, approvals }) {
   );
 }
 
-// ── 장비 목록 화면 ─────────────────────────────────────────────────────────
-function TLScreen({ tls, teams, currentUser, onAdd, onDelete, onStatusChange }) {
+function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ sn: "", team: "", location: "", status: "정상", inDate: "", memo: "" });
-  const canEdit = currentUser.role === "sojangnm" || currentUser.role === "admin";
-  const myTls = currentUser.role === "team" ? tls.filter(t => t.team === currentUser.team) : tls;
+  const [editTarget, setEditTarget] = useState(null);
+  const [form, setForm] = useState({ sn: "", team: "", location: "", spec: "10m급", status: "정상", inDate: "", memo: "" });
+  const [sortBy, setSortBy] = useState("team");
 
-  async function handleAdd() {
+  const isManager = currentUser.role === "sojangnm" || currentUser.role === "admin";
+  const isTeam = currentUser.role === "team";
+  const myTls = isTeam ? tls.filter(t => t.team === currentUser.team) : [...tls];
+
+  const sorted = [...myTls].sort((a, b) => {
+    if (sortBy === "team") return (a.team || "").localeCompare(b.team || "");
+    if (sortBy === "sn") return (a.sn || "").localeCompare(b.sn || "");
+    if (sortBy === "spec") return (a.spec || "").localeCompare(b.spec || "");
+    return 0;
+  });
+
+  const okCount = myTls.filter(t => t.status === "정상").length;
+  const checkCount = myTls.filter(t => t.status === "점검중").length;
+  const brokenCount = myTls.filter(t => t.status === "고장").length;
+
+  function openAdd() {
+    setEditTarget(null);
+    setForm({ sn: "", team: "", location: "", spec: "10m급", status: "정상", inDate: "", memo: "" });
+    setShowForm(true);
+  }
+
+  function openEdit(t) {
+    setEditTarget(t);
+    setForm({ sn: t.sn, team: t.team, location: t.location || "", spec: t.spec || "10m급", status: t.status, inDate: t.inDate || "", memo: t.memo || "" });
+    setShowForm(true);
+  }
+
+  async function handleSave() {
     if (!form.sn) { alert("일련번호를 입력해주세요."); return; }
     if (!form.team) { alert("담당 팀을 선택해주세요."); return; }
-    await onAdd({ ...form, inDate: form.inDate || new Date().toISOString().slice(0, 10) });
-    setForm({ sn: "", team: "", location: "", status: "정상", inDate: "", memo: "" });
+    if (editTarget) {
+      await onUpdate(editTarget.id, { sn: form.sn, team: form.team, location: form.location, spec: form.spec, status: form.status, inDate: form.inDate, memo: form.memo });
+    } else {
+      await onAdd({ ...form, inDate: form.inDate || new Date().toISOString().slice(0, 10) });
+    }
     setShowForm(false);
+    setEditTarget(null);
   }
 
   return (
     <div>
-      {canEdit && (
-        <button className="btn btn-primary full mb12" onClick={() => setShowForm(!showForm)}>
-          + 장비 등록
-        </button>
+      {/* 팀장: 보유 대수 요약 */}
+      {isTeam && (
+        <div className="metric-grid" style={{ marginBottom: 16 }}>
+          <div className="metric"><div className="metric-val">{myTls.length}</div><div className="metric-label">보유 TL</div></div>
+          <div className="metric"><div className="metric-val green">{okCount}</div><div className="metric-label">정상</div></div>
+          <div className="metric"><div className="metric-val amber">{checkCount}</div><div className="metric-label">점검중</div></div>
+          <div className="metric"><div className="metric-val red">{brokenCount}</div><div className="metric-label">고장</div></div>
+        </div>
       )}
+
+      {isManager && <button className="btn btn-primary full mb12" onClick={openAdd}>+ 장비 등록</button>}
+
+      {/* 소장/관리자: 정렬 */}
+      {isManager && (
+        <div className="sort-bar">
+          <span className="sort-label">정렬</span>
+          {[["team", "팀별"], ["sn", "일련번호순"], ["spec", "규격순"]].map(([val, label]) => (
+            <button key={val} className={`sort-btn${sortBy === val ? " active" : ""}`} onClick={() => setSortBy(val)}>{label}</button>
+          ))}
+        </div>
+      )}
+
+      {/* 등록/수정 폼 */}
       {showForm && (
         <div className="card mb12">
-          <div className="card-title mb8">신규 TL 등록</div>
+          <div className="card-title mb8">{editTarget ? "장비 수정" : "신규 TL 등록"}</div>
           <label>일련번호</label>
           <input value={form.sn} onChange={e => setForm({ ...form, sn: e.target.value })} placeholder="예: SN-20250515" />
           <label>담당 팀</label>
@@ -346,7 +395,11 @@ function TLScreen({ tls, teams, currentUser, onAdd, onDelete, onStatusChange }) 
             {teams.map(t => <option key={t.id}>{t.name}</option>)}
           </select>
           <label>위치 (층/구역)</label>
-          <input value={form.location} onChange={e => setForm({ ...form, location: e.target.value })} placeholder="예: 3층 서측" />
+          <input value={form.location} onChange={e => setForm({ ...form, location: e.target.value })} placeholder="예: B2F 서측" />
+          <label>규격</label>
+          <select value={form.spec} onChange={e => setForm({ ...form, spec: e.target.value })}>
+            {TL_SPECS.map(s => <option key={s}>{s}</option>)}
+          </select>
           <label>반입일자</label>
           <input type="date" value={form.inDate} onChange={e => setForm({ ...form, inDate: e.target.value })} />
           <label>상태</label>
@@ -356,16 +409,21 @@ function TLScreen({ tls, teams, currentUser, onAdd, onDelete, onStatusChange }) 
           <label>메모</label>
           <input value={form.memo} onChange={e => setForm({ ...form, memo: e.target.value })} placeholder="비고" />
           <div className="btn-row">
-            <button className="btn btn-primary btn-sm" onClick={handleAdd}>등록</button>
-            <button className="btn btn-sm" onClick={() => setShowForm(false)}>취소</button>
+            <button className="btn btn-primary btn-sm" onClick={handleSave}>{editTarget ? "저장" : "등록"}</button>
+            <button className="btn btn-sm" onClick={() => { setShowForm(false); setEditTarget(null); }}>취소</button>
           </div>
         </div>
       )}
-      {myTls.map(t => (
+
+      {sorted.length === 0 && <div className="empty">등록된 장비가 없습니다.</div>}
+      {sorted.map(t => (
         <div key={t.id} className="card">
           <div className="card-header">
             <div>
-              <div className="card-title">{t.sn}</div>
+              <div className="card-title">
+                {t.sn}
+                {t.spec && <span className="pill pill-gray" style={{ marginLeft: 6 }}>{t.spec}</span>}
+              </div>
               <div className="card-sub">{t.team} · {t.location}</div>
             </div>
             <span className="status-tag">
@@ -375,22 +433,32 @@ function TLScreen({ tls, teams, currentUser, onAdd, onDelete, onStatusChange }) 
           </div>
           <div className="card-meta">반입일: {t.inDate}{t.memo && " · " + t.memo}</div>
           {t.todayUse && <div className="alert alert-info mb8">✓ 금일 사용중 — {t.todayPurpose}</div>}
-          {canEdit && (
+
+          {/* 소장/관리자: 수정 + 삭제 */}
+          {isManager && (
             <div className="btn-row">
-              <select defaultValue={t.status} onChange={e => onStatusChange(t.id, e.target.value)} className="select-sm">
-                <option>정상</option><option>점검중</option><option>고장</option>
-              </select>
+              <button className="btn btn-sm" onClick={() => openEdit(t)}>✏ 수정</button>
               <button className="btn btn-danger btn-sm" onClick={() => { if (window.confirm("장비를 삭제하시겠습니까?")) onDelete(t.id); }}>삭제</button>
+            </div>
+          )}
+
+          {/* 팀장: 위치만 수정 */}
+          {isTeam && (
+            <div style={{ marginTop: 8 }}>
+              <input
+                style={{ margin: 0, fontSize: 12 }}
+                defaultValue={t.location}
+                placeholder="위치 수정 (예: B1F 동측)"
+                onBlur={e => { if (e.target.value !== t.location) onUpdate(t.id, { location: e.target.value }); }}
+              />
             </div>
           )}
         </div>
       ))}
-      {myTls.length === 0 && <div className="empty">등록된 장비가 없습니다.</div>}
     </div>
   );
 }
 
-// ── 금일 사용 화면 ─────────────────────────────────────────────────────────
 function TodayScreen({ tls, currentUser, onToggle, onPurpose }) {
   const myTls = currentUser.role === "team" ? tls.filter(t => t.team === currentUser.team) : tls;
   const useCount = myTls.filter(t => t.todayUse).length;
@@ -407,7 +475,7 @@ function TodayScreen({ tls, currentUser, onToggle, onPurpose }) {
           <div className="today-row">
             <button className={`toggle ${t.todayUse ? "on" : ""}`} onClick={() => onToggle(t.id, t.todayUse)} aria-label="사용 여부 토글" />
             <div className="flex1">
-              <div className="tl-sn">{t.sn}</div>
+              <div className="tl-sn">{t.sn} {t.spec && <span className="pill pill-gray">{t.spec}</span>}</div>
               <div className="tl-meta">{t.team} · {t.location}</div>
             </div>
             {t.status !== "정상" && (
@@ -417,12 +485,8 @@ function TodayScreen({ tls, currentUser, onToggle, onPurpose }) {
             )}
           </div>
           {t.todayUse && (
-            <input
-              className="purpose-input"
-              placeholder="사용 용도 입력 (예: 덕트 설치, 배관 작업...)"
-              defaultValue={t.todayPurpose}
-              onBlur={e => onPurpose(t.id, e.target.value)}
-            />
+            <input className="purpose-input" placeholder="사용 용도 입력 (예: 덕트 설치, 배관 작업...)"
+              defaultValue={t.todayPurpose} onBlur={e => onPurpose(t.id, e.target.value)} />
           )}
         </div>
       ))}
@@ -431,19 +495,25 @@ function TodayScreen({ tls, currentUser, onToggle, onPurpose }) {
   );
 }
 
-// ── 결재 화면 ─────────────────────────────────────────────────────────────
-function ApprovalScreen({ approvals, tls, onDecide }) {
+function ApprovalScreen({ approvals, onDecide }) {
   const pending = approvals.filter(a => a.status === "대기");
   const done = approvals.filter(a => a.status !== "대기");
+
+  async function handleDecide(id, status, approval) {
+    if (status === "반려") {
+      if (!window.confirm("정말 반려하시겠습니까?\n반려 후에는 되돌릴 수 없습니다.")) return;
+    }
+    await onDecide(id, status, approval);
+  }
 
   return (
     <div>
       <div className="section-title">결재 대기 ({pending.length}건)</div>
       {pending.length === 0 && <div className="empty">대기 중인 결재가 없습니다.</div>}
-      {pending.map(a => <ApprovalCard key={a.id} approval={a} showBtn onDecide={onDecide} />)}
+      {pending.map(a => <ApprovalCard key={a.id} approval={a} showBtn onDecide={handleDecide} />)}
       <div className="section-title">처리 완료</div>
       {done.length === 0 && <div className="empty">처리된 결재가 없습니다.</div>}
-      {done.map(a => <ApprovalCard key={a.id} approval={a} showBtn={false} onDecide={onDecide} />)}
+      {done.map(a => <ApprovalCard key={a.id} approval={a} showBtn={false} onDecide={handleDecide} />)}
     </div>
   );
 }
@@ -468,7 +538,6 @@ function ApprovalCard({ approval: a, showBtn, onDecide }) {
   );
 }
 
-// ── 승인 요청 화면 ─────────────────────────────────────────────────────────
 function RequestScreen({ tls, teams, currentUser, onSubmit, approvals }) {
   const [form, setForm] = useState({ type: "이동", tlId: "", to: "", reason: "" });
   const myTls = tls.filter(t => t.team === currentUser.team);
@@ -523,8 +592,67 @@ function RequestScreen({ tls, teams, currentUser, onSubmit, approvals }) {
   );
 }
 
-// ── 팀 관리 화면 ──────────────────────────────────────────────────────────
-function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw, currentUser }) {
+function HistoryScreen() {
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function fetchHistory() {
+      const snap = await getDocs(query(collection(db, "history"), orderBy("date", "desc")));
+      setHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setLoading(false);
+    }
+    fetchHistory();
+  }, []);
+
+  if (loading) return <div className="empty">불러오는 중...</div>;
+  if (history.length === 0) return (
+    <div className="empty">
+      아직 기록된 데이터가 없습니다.<br />
+      <span style={{ fontSize: 12, marginTop: 8, display: "block" }}>매일 자동으로 저장됩니다.</span>
+    </div>
+  );
+
+  return (
+    <div>
+      <div className="section-title">일별 TL 가동률</div>
+      {history.map(h => {
+        const totalAll = h.data?.reduce((s, d) => s + (d.total || 0), 0) || 0;
+        const usedAll = h.data?.reduce((s, d) => s + (d.used || 0), 0) || 0;
+        const rate = totalAll > 0 ? Math.round((usedAll / totalAll) * 100) : 0;
+        const rateColor = rate >= 70 ? "#1D9E75" : rate >= 40 ? "#BA7517" : "#E24B4A";
+        return (
+          <div key={h.id} className="card">
+            <div className="card-header">
+              <div className="card-title">{h.date}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: rateColor }}>전체 {rate}%</div>
+            </div>
+            <div style={{ fontSize: 12, color: "#999", marginBottom: 12 }}>
+              전체 {totalAll}대 중 {usedAll}대 사용
+            </div>
+            {h.data?.map((d, i) => {
+              const r = d.total > 0 ? Math.round((d.used / d.total) * 100) : 0;
+              const rc = r >= 70 ? "#1D9E75" : r >= 40 ? "#EF9F27" : "#E24B4A";
+              return (
+                <div key={i} style={{ marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+                    <span style={{ fontWeight: 600 }}>{d.team}</span>
+                    <span style={{ color: "#666" }}>{d.used}/{d.total}대 · {r}%</span>
+                  </div>
+                  <div className="rate-bar-bg">
+                    <div className="rate-bar-fill" style={{ width: `${r}%`, background: rc }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw }) {
   const [modal, setModal] = useState(null);
   const [form, setForm] = useState({ name: "", leader: "", pw: "" });
   const [pwModal, setPwModal] = useState(null);
@@ -563,7 +691,8 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
 
   return (
     <div>
-      <button className="btn btn-primary full mb12" onClick={() => { setModal({ type: "add" }); setForm({ name: "", leader: "", pw: "" }); setErr(""); }}>
+      <button className="btn btn-primary full mb12"
+        onClick={() => { setModal({ type: "add" }); setForm({ name: "", leader: "", pw: "" }); setErr(""); }}>
         + 새 팀 추가
       </button>
 
@@ -594,7 +723,11 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
                 <div className="tl-meta">팀장: {t.leader || "-"} · TL {tlCount}대 보유</div>
               </div>
               <div className="btn-row">
-                <button className="btn btn-sm" onClick={() => { setModal({ type: "edit", team: t }); setForm({ name: t.name, leader: t.leader || "", pw: "" }); setErr(""); }}>수정</button>
+                <button className="btn btn-sm" onClick={() => {
+                  setModal({ type: "edit", team: t });
+                  setForm({ name: t.name, leader: t.leader || "", pw: "" });
+                  setErr("");
+                }}>수정</button>
                 <button className="btn btn-danger btn-sm" onClick={() => handleDelete(t)}>삭제</button>
               </div>
             </div>
@@ -603,7 +736,6 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
       </div>
       {teams.length > 0 && <div className="alert alert-warn mt8">⚠ 팀 삭제 시 해당 팀의 TL은 미배정 처리됩니다.</div>}
 
-      {/* 팀 추가/수정 모달 */}
       {modal && (
         <div className="modal-bg" onClick={() => setModal(null)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
@@ -625,7 +757,6 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
         </div>
       )}
 
-      {/* 비밀번호 변경 모달 */}
       {pwModal && (
         <div className="modal-bg" onClick={() => setPwModal(null)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
