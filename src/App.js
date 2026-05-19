@@ -26,6 +26,7 @@ const NAV_TABS = {
     { id: "overview", icon: "📊", label: "현황" },
     { id: "tl", icon: "🏗", label: "장비목록" },
     { id: "today", icon: "📅", label: "금일사용" },
+    { id: "approval", icon: "✅", label: "결재" },
     { id: "history", icon: "📈", label: "가동률" },
   ],
   team: [
@@ -196,21 +197,22 @@ export default function App() {
   }
 
   // 운전원 계정 추가/삭제
-  async function addDriver(name, pw, bl, tlId) {
+  async function addDriver(name, pw, bl, teamName) {
     if (!name || !pw) return "이름과 비밀번호를 입력해주세요.";
     if (accounts.find(a => a.id === name)) return "이미 존재하는 이름입니다.";
-    await setDoc(doc(db, "accounts", name), { pw, role: "driver", label: name, bl, tlId });
+    await setDoc(doc(db, "accounts", name), { pw, role: "driver", label: name, bl, teamName });
     return null;
   }
   async function deleteAccount(id) { await deleteDoc(doc(db, "accounts", id)); }
 
   // 작업 로그
-  async function startWork(user) {
-    const tl = tls.find(t => t.id === user.tlId);
+  async function startWork(user, tlId) {
+    const tl = tls.find(t => t.id === tlId);
     await addDoc(collection(db, "workLogs"), {
       driverId: user.id,
       driverName: user.label,
-      tlId: user.tlId || "",
+      teamName: user.teamName || "",
+      tlId: tlId || "",
       tlSn: tl?.sn || "미지정",
       bl: user.bl || "",
       startedAt: serverTimestamp(),
@@ -261,7 +263,7 @@ export default function App() {
         {activeTab === "overview" && <OverviewScreen tls={tls} teams={teams} approvals={approvals} currentUser={currentUser} />}
         {activeTab === "tl" && <TLScreen tls={tls} teams={teams} currentUser={currentUser} onAdd={addTL} onUpdate={updateTL} onDelete={deleteTL} />}
         {activeTab === "today" && <TodayScreen tls={tls} currentUser={currentUser} onToggle={toggleTodayUse} onPurpose={setTodayPurpose} workLogs={workLogs} />}
-        {activeTab === "approval" && <ApprovalScreen approvals={approvals} onDecide={decideApproval} currentUser={currentUser} />}
+        {activeTab === "approval" && <ApprovalScreen approvals={approvals} tls={tls} onDecide={decideApproval} currentUser={currentUser} />}
         {activeTab === "request" && <RequestScreen tls={tls} teams={teams} currentUser={currentUser} onSubmit={submitApproval} approvals={approvals} />}
         {activeTab === "teams" && <TeamsScreen teams={teams} tls={tls} accounts={accounts} onAdd={addTeam} onEdit={editTeam} onDelete={deleteTeam} onChangePw={changePassword} onAddDriver={addDriver} onDeleteAccount={deleteAccount} />}
         {activeTab === "history" && <HistoryScreen tls={tls} teams={teams} workLogs={workLogs} currentUser={currentUser} />}
@@ -702,7 +704,9 @@ function TodayScreen({ tls, currentUser, onToggle, onPurpose, workLogs }) {
 }
 
 // ── 결재 ──────────────────────────────────────────────────────────────────
-function ApprovalScreen({ approvals, onDecide, currentUser }) {
+function ApprovalScreen({ approvals, tls, onDecide, currentUser }) {
+  // 소장: 전체 / 관리자: 자기 BL만 / 팀장: 없음
+  const canDecide = currentUser.role === "sojangnm" || currentUser.role === "admin";
   const myApprovals = currentUser.role === "sojangnm"
     ? approvals
     : approvals.filter(a => a.bl === currentUser.bl);
@@ -718,18 +722,25 @@ function ApprovalScreen({ approvals, onDecide, currentUser }) {
 
   return (
     <div>
+      {currentUser.role === "admin" && (
+        <div className="alert alert-info mb12" style={{ fontSize: 12 }}>
+          {currentUser.bl} 소속 결재 요청만 표시됩니다.
+        </div>
+      )}
       <div className="section-title">결재 대기 ({pending.length}건)</div>
       {pending.length === 0 && <div className="empty">대기 중인 결재가 없습니다.</div>}
-      {pending.map(a => <ApprovalCard key={a.id} approval={a} showBtn onDecide={handleDecide} />)}
+      {pending.map(a => <ApprovalCard key={a.id} approval={a} showBtn={canDecide} onDecide={handleDecide} tls={tls} />)}
       <div className="section-title">처리 완료</div>
       {done.length === 0 && <div className="empty">처리된 결재가 없습니다.</div>}
-      {done.map(a => <ApprovalCard key={a.id} approval={a} showBtn={false} onDecide={handleDecide} />)}
+      {done.map(a => <ApprovalCard key={a.id} approval={a} showBtn={false} onDecide={handleDecide} tls={tls} />)}
     </div>
   );
 }
 
-function ApprovalCard({ approval: a, showBtn, onDecide }) {
+function ApprovalCard({ approval: a, showBtn, onDecide, tls }) {
   const typeClass = a.type === "반입" ? "type-in" : a.type === "반출" ? "type-out" : "type-move";
+  // tlId → 일련번호(sn) 변환
+  const tlSn = tls?.find(t => t.id === a.tlId)?.sn || a.tlSn || a.tlId || "-";
   return (
     <div className="approval-card">
       <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
@@ -739,7 +750,7 @@ function ApprovalCard({ approval: a, showBtn, onDecide }) {
       {a.type === "반입" ? (
         <div className="approval-title">{a.from} 반입 요청 · {a.newSn || "일련번호 미정"}</div>
       ) : (
-        <div className="approval-title">{a.from} → {a.to} · {a.tlId}</div>
+        <div className="approval-title">{a.from}{a.to ? ` → ${a.to}` : ""} · {tlSn}</div>
       )}
       <div className="approval-reason">{a.reason}</div>
       {a.type === "반입" && (
@@ -840,10 +851,11 @@ function RequestScreen({ tls, teams, currentUser, onSubmit, approvals }) {
       {myApprovals.length === 0 && <div className="empty">요청 내역이 없습니다.</div>}
       {myApprovals.map(a => {
         const typeClass = a.type === "반입" ? "type-in" : a.type === "반출" ? "type-out" : "type-move";
+        const tlSn = tls.find(t => t.id === a.tlId)?.sn || a.tlSn || a.tlId || "-";
         return (
           <div key={a.id} className="approval-card">
             <span className={`approval-type ${typeClass}`}>{a.type}</span>
-            <div className="approval-title">{a.type === "반입" ? `신규 반입 · ${a.newSn}` : `${a.tlId}${a.to ? " → " + a.to : ""}`}</div>
+            <div className="approval-title">{a.type === "반입" ? `신규 반입 · ${a.newSn}` : `${tlSn}${a.to ? " → " + a.to : ""}`}</div>
             <div className="approval-reason">{a.reason}</div>
             <span className={`pill ${a.status === "승인" ? "pill-green" : a.status === "반려" ? "pill-red" : "pill-amber"}`}>{a.status}</span>
           </div>
@@ -966,7 +978,7 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
 
 // ── 운전원 작업 기록 ──────────────────────────────────────────────────────
 function DriverScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
-  const myTl = tls.find(t => t.id === currentUser.tlId);
+  const myTeamTls = tls.filter(t => t.team === currentUser.teamName);
   const todayStr = new Date().toISOString().slice(0, 10);
   const myLogs = workLogs.filter(l => l.driverId === currentUser.id && l.date === todayStr);
   const activeLog = myLogs.find(l => l.endedAt === null);
@@ -1001,12 +1013,13 @@ function DriverScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
       <div className="card" style={{ textAlign: "center", padding: "24px 16px", marginBottom: 16 }}>
         <div style={{ fontSize: 13, color: "#999", marginBottom: 4 }}>{currentUser.label}</div>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16 }}>
-          {myTl ? `${myTl.sn} · ${myTl.location}` : "배정된 TL 없음"}
+          {currentUser.teamName ? `${currentUser.bl} · ${currentUser.teamName}` : "팀 미배정"}
+          {myTeamTls.length > 0 && <span style={{ fontSize: 12, color: "#aaa", marginLeft: 6 }}>TL {myTeamTls.length}대</span>}
         </div>
 
         {activeLog ? (
           <>
-            <div style={{ fontSize: 11, color: "#888", marginBottom: 6 }}>작업 진행 중</div>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>작업 진행 중 — {activeLog.tlSn}</div>
             <div style={{ fontSize: 48, fontWeight: 700, color: "#534AB7", letterSpacing: 2, marginBottom: 20 }}>
               {fmt(elapsed)}
             </div>
@@ -1017,11 +1030,14 @@ function DriverScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
           </>
         ) : (
           <>
-            <div style={{ fontSize: 13, color: "#aaa", marginBottom: 20 }}>작업 대기 중</div>
-            <button className="btn btn-success" style={{ width: "100%", padding: "14px", fontSize: 16 }}
-              onClick={() => { if (window.confirm("작업을 시작하시겠습니까?")) onStart(currentUser); }}>
-              ▶ 작업 시작
-            </button>
+            <div style={{ fontSize: 13, color: "#aaa", marginBottom: 12 }}>작업할 TL을 선택하세요</div>
+            {myTeamTls.length === 0 && <div style={{ fontSize: 13, color: "#E24B4A", marginBottom: 16 }}>배정된 TL이 없습니다.</div>}
+            {myTeamTls.map(tl => (
+              <button key={tl.id} className="group-btn" style={{ marginBottom: 8, padding: "12px 14px" }}
+                onClick={() => { if (window.confirm(`${tl.sn} 작업을 시작하시겠습니까?`)) onStart(currentUser, tl.id); }}>
+                🏗 {tl.sn} <span style={{ fontSize: 12, color: "#aaa", marginLeft: 6 }}>{tl.location}</span>
+              </button>
+            ))}
           </>
         )}
       </div>
@@ -1066,7 +1082,7 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
   const [pwModal, setPwModal] = useState(null);
   const [newPw, setNewPw] = useState("");
   const [driverModal, setDriverModal] = useState(false);
-  const [driverForm, setDriverForm] = useState({ name: "", pw: "", bl: "1BL", tlId: "" });
+  const [driverForm, setDriverForm] = useState({ name: "", pw: "", bl: "1BL", teamName: "" });
   const [err, setErr] = useState("");
 
   const systemAccounts = accounts.filter(a => a.role === "sojangnm");
@@ -1099,9 +1115,9 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
   }
 
   async function handleAddDriver() {
-    const error = await onAddDriver(driverForm.name, driverForm.pw, driverForm.bl, driverForm.tlId);
+    const error = await onAddDriver(driverForm.name, driverForm.pw, driverForm.bl, driverForm.teamName);
     if (error) { setErr(error); return; }
-    setDriverModal(false); setDriverForm({ name: "", pw: "", bl: "1BL", tlId: "" }); setErr("");
+    setDriverModal(false); setDriverForm({ name: "", pw: "", bl: "1BL", teamName: "" }); setErr("");
   }
 
   return (
@@ -1132,7 +1148,7 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
 
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
         <button className="btn btn-primary flex1" onClick={() => { setModal({ type: "add" }); setForm({ name: "", leader: "", pw: "", bl: "1BL" }); setErr(""); }}>+ 팀 추가</button>
-        <button className="btn flex1" onClick={() => { setDriverModal(true); setDriverForm({ name: "", pw: "", bl: "1BL", tlId: "" }); setErr(""); }}>+ 운전원 추가</button>
+        <button className="btn flex1" onClick={() => { setDriverModal(true); setDriverForm({ name: "", pw: "", bl: "1BL", teamName: "" }); setErr(""); }}>+ 운전원 추가</button>
       </div>
 
       {BLS.map(bl => (
@@ -1165,13 +1181,12 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
       <div className="card mb12">
         {driverAccounts.length === 0 && <div className="empty-sm">등록된 운전원 없음</div>}
         {driverAccounts.map((a, i) => {
-          const tl = tls.find(t => t.id === a.tlId);
           return (
             <div key={a.id} className={`team-row${i < driverAccounts.length - 1 ? " border-b" : ""}`}>
               <div className="team-avatar" style={{ background: "#FFF3E0", color: "#E65100" }}>🚧</div>
               <div className="flex1">
                 <div className="tl-sn">{a.label || a.id}</div>
-                <div className="tl-meta">{a.bl} · {tl ? `${tl.sn} (${tl.location})` : "TL 미배정"}</div>
+                <div className="tl-meta">{a.bl} · {a.teamName || "팀 미배정"}</div>
               </div>
               <div className="btn-row">
                 <button className="btn btn-sm" onClick={() => { setPwModal(a); setNewPw(""); }}>비번변경</button>
@@ -1221,10 +1236,10 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
             <input value={driverForm.name} onChange={e => setDriverForm({ ...driverForm, name: e.target.value })} placeholder="예: 홍길동" />
             <label>비밀번호</label>
             <input type="password" value={driverForm.pw} onChange={e => setDriverForm({ ...driverForm, pw: e.target.value })} placeholder="비밀번호 입력" />
-            <label>담당 TL (선택)</label>
-            <select value={driverForm.tlId} onChange={e => setDriverForm({ ...driverForm, tlId: e.target.value })}>
+            <label>소속 팀</label>
+            <select value={driverForm.teamName} onChange={e => setDriverForm({ ...driverForm, teamName: e.target.value })}>
               <option value="">선택해주세요</option>
-              {tls.filter(t => t.bl === driverForm.bl).map(t => <option key={t.id} value={t.id}>{t.sn} ({t.team} · {t.location})</option>)}
+              {teams.filter(t => t.bl === driverForm.bl).map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
             </select>
             <div className="btn-row mt8">
               <button className="btn btn-primary flex1" onClick={handleAddDriver}>추가</button>
