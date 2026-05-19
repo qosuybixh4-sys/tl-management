@@ -32,6 +32,7 @@ const NAV_TABS = {
   team: [
     { id: "tl", icon: "🏗", label: "내 장비" },
     { id: "today", icon: "📅", label: "금일사용" },
+    { id: "rental", icon: "🔄", label: "대여" },
     { id: "request", icon: "📨", label: "승인요청" },
   ],
   driver: [
@@ -46,6 +47,7 @@ export default function App() {
   const [approvals, setApprovals] = useState([]);
   const [accounts, setAccounts] = useState([]);
   const [workLogs, setWorkLogs] = useState([]);
+  const [rentals, setRentals] = useState([]);
   const [activeTab, setActiveTab] = useState("");
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(!navigator.onLine);
@@ -73,6 +75,7 @@ export default function App() {
       onSnapshot(collection(db, "tls"), snap => setTls(snap.docs.map(d => ({ id: d.id, ...d.data() })))),
       onSnapshot(query(collection(db, "approvals"), orderBy("createdAt", "desc")), snap => setApprovals(snap.docs.map(d => ({ id: d.id, ...d.data() })))),
       onSnapshot(query(collection(db, "workLogs"), orderBy("startedAt", "desc")), snap => setWorkLogs(snap.docs.map(d => ({ id: d.id, ...d.data() })))),
+      onSnapshot(query(collection(db, "rentals"), orderBy("createdAt", "desc")), snap => setRentals(snap.docs.map(d => ({ id: d.id, ...d.data() })))),
     ];
     initSystemAccounts().then(() => setLoading(false));
     return () => unsubs.forEach(u => u());
@@ -164,7 +167,7 @@ export default function App() {
   }
   async function decideApproval(id, status, approval) {
     await updateDoc(doc(db, "approvals", id), { status });
-    if (status === "승인" && approval.type === "이동") {
+    if (status === "승인" && approval.type === "이관") {
       const tl = tls.find(t => t.id === approval.tlId);
       if (tl) await updateDoc(doc(db, "tls", approval.tlId), { team: approval.to });
     }
@@ -228,6 +231,40 @@ export default function App() {
     await updateDoc(doc(db, "workLogs", logId), { endedAt: serverTimestamp(), durationMin });
   }
 
+  // 대여 함수
+  async function createRental(fromTeam, toTeam, tlId, tlSn, bl) {
+    const today = new Date().toISOString().slice(0, 10);
+    // 이미 오늘 같은 TL 대여 있으면 차단
+    const existing = rentals.find(r => r.tlId === tlId && r.date === today && r.status === "대여중");
+    if (existing) { alert("이미 대여 중인 TL입니다."); return; }
+    await addDoc(collection(db, "rentals"), {
+      fromTeam, toTeam, tlId, tlSn, bl,
+      date: today,
+      status: "대여중",
+      createdAt: serverTimestamp(),
+    });
+    // TL 팀을 임시 변경 (대여팀으로)
+    await updateDoc(doc(db, "tls", tlId), {
+      team: toTeam,
+      rentedFrom: fromTeam,
+      isRented: true,
+    });
+  }
+
+  async function returnRental(rentalId, tlId, fromTeam) {
+    await updateDoc(doc(db, "rentals", rentalId), { status: "반환완료", returnedAt: serverTimestamp() });
+    await updateDoc(doc(db, "tls", tlId), { team: fromTeam, rentedFrom: null, isRented: false });
+  }
+
+  // 자정 자동 반환 체크
+  useEffect(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    rentals.filter(r => r.status === "대여중" && r.date < today).forEach(async r => {
+      await updateDoc(doc(db, "rentals", r.id), { status: "반환완료", returnedAt: serverTimestamp() });
+      await updateDoc(doc(db, "tls", r.tlId), { team: r.fromTeam, rentedFrom: null, isRented: false });
+    });
+  }, [rentals]);
+
   useEffect(() => {
     if (currentUser && !activeTab) {
       setActiveTab(NAV_TABS[currentUser.role]?.[0]?.id || "");
@@ -264,6 +301,7 @@ export default function App() {
         {activeTab === "tl" && <TLScreen tls={tls} teams={teams} currentUser={currentUser} onAdd={addTL} onUpdate={updateTL} onDelete={deleteTL} />}
         {activeTab === "today" && <TodayScreen tls={tls} currentUser={currentUser} onToggle={toggleTodayUse} onPurpose={setTodayPurpose} workLogs={workLogs} />}
         {activeTab === "approval" && <ApprovalScreen approvals={approvals} tls={tls} onDecide={decideApproval} currentUser={currentUser} />}
+        {activeTab === "rental" && <RentalScreen tls={tls} teams={teams} currentUser={currentUser} rentals={rentals} onRent={createRental} onReturn={returnRental} />}
         {activeTab === "request" && <RequestScreen tls={tls} teams={teams} currentUser={currentUser} onSubmit={submitApproval} approvals={approvals} />}
         {activeTab === "teams" && <TeamsScreen teams={teams} tls={tls} accounts={accounts} onAdd={addTeam} onEdit={editTeam} onDelete={deleteTeam} onChangePw={changePassword} onAddDriver={addDriver} onDeleteAccount={deleteAccount} />}
         {activeTab === "history" && <HistoryScreen tls={tls} teams={teams} workLogs={workLogs} currentUser={currentUser} />}
@@ -310,7 +348,16 @@ function LoginScreen({ accounts, onLogin }) {
         <>
           <div className="section-title" style={{ marginTop: 0 }}>소속 선택</div>
           {["소장", "1BL", "2BL"].map(g => (
-            <button key={g} className="group-btn" onClick={() => { setGroup(g); setStep(g === "소장" ? "login-direct" : "role"); setRoleId(""); setErr(""); }}>
+            <button key={g} className="group-btn" onClick={() => {
+              setGroup(g);
+              if (g === "소장") {
+                const sojangnmAcc = accounts.find(a => a.role === "sojangnm");
+                if (sojangnmAcc) { setRoleId(sojangnmAcc.id); setStep("login"); }
+              } else {
+                setStep("role");
+              }
+              setErr("");
+            }}>
               {g === "소장" ? "🏢 소장" : g === "1BL" ? "🔵 1BL" : "🟢 2BL"}
             </button>
           ))}
@@ -325,19 +372,6 @@ function LoginScreen({ accounts, onLogin }) {
           {groupAccounts.map(a => (
             <button key={a.id} className="group-btn" onClick={() => { setRoleId(a.id); setStep("login"); setErr(""); }}>
               {roleLabel(a.role) === "TL 운전원" ? "🚧" : roleLabel(a.role) === "관리자" ? "🔧" : "👷"} {a.label || a.id} <span style={{ fontSize: 11, color: "#aaa", marginLeft: 4 }}>({roleLabel(a.role)})</span>
-            </button>
-          ))}
-          <button className="btn full mt8" onClick={() => { setStep("group"); setGroup(""); }}>← 뒤로</button>
-        </>
-      )}
-
-      {/* Step 2-소장: 소장 직접 선택 */}
-      {step === "login-direct" && (
-        <>
-          <div className="section-title" style={{ marginTop: 0 }}>소장 계정</div>
-          {sojangnm.map(a => (
-            <button key={a.id} className="group-btn" onClick={() => { setRoleId(a.id); setStep("login"); setErr(""); }}>
-              🏢 {a.label || a.id}
             </button>
           ))}
           <button className="btn full mt8" onClick={() => { setStep("group"); setGroup(""); }}>← 뒤로</button>
@@ -359,9 +393,12 @@ function LoginScreen({ accounts, onLogin }) {
           <button className="btn btn-primary full" onClick={handleLogin} disabled={loading}>
             {loading ? "로그인 중..." : "로그인"}
           </button>
-          <button className="btn full mt8" onClick={() => { setStep(group === "소장" ? "login-direct" : "role"); setPw(""); setErr(""); }}>← 뒤로</button>
+          <button className="btn full mt8" onClick={() => { setStep(group === "소장" ? "group" : "role"); setPw(""); setErr(""); }}>← 뒤로</button>
         </>
       )}
+      <div style={{ textAlign: "center", fontSize: 12, color: "#bbb", marginTop: 32 }}>
+        문의) 010-9148-5079 이정환 선임
+      </div>
     </div>
   );
 }
@@ -624,6 +661,7 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
                 </span>
               </div>
               <div className="card-meta">반입일: {t.inDate}{t.memo && " · " + t.memo}</div>
+              {t.isRented && <div className="alert alert-warn mb8" style={{padding:"6px 10px",fontSize:12}}>🔄 대여중 (원소유: {t.rentedFrom})</div>}
               {t.todayUse && <div className="alert alert-info mb8">✓ 금일 사용중 — {t.todayPurpose}</div>}
               {isManager && (
                 <div className="btn-row">
@@ -773,7 +811,7 @@ function ApprovalCard({ approval: a, showBtn, onDecide, tls }) {
 
 // ── 승인 요청 ─────────────────────────────────────────────────────────────
 function RequestScreen({ tls, teams, currentUser, onSubmit, approvals }) {
-  const [type, setType] = useState("이동");
+  const [type, setType] = useState("이관");
   const [form, setForm] = useState({ tlId: "", to: "", reason: "", newSn: "", newSpec: "10m급", newLocation: "", newInDate: "" });
   const myTls = tls.filter(t => t.team === currentUser.team);
   const myApprovals = approvals.filter(a => a.requester === currentUser.id);
@@ -782,7 +820,7 @@ function RequestScreen({ tls, teams, currentUser, onSubmit, approvals }) {
   async function handleSubmit() {
     if (!form.reason) { alert("요청 사유를 입력해주세요."); return; }
     if (type !== "반입" && !form.tlId) { alert("대상 TL을 선택해주세요."); return; }
-    if (type === "이동" && !form.to) { alert("목적지 팀을 선택해주세요."); return; }
+    if (type === "이관" && !form.to) { alert("목적지 팀을 선택해주세요."); return; }
     if (type === "반입" && !form.newSn) { alert("일련번호를 입력해주세요."); return; }
     await onSubmit({ type, from: currentUser.team, bl: currentUser.bl, requester: currentUser.id, ...form });
     setForm({ tlId: "", to: "", reason: "", newSn: "", newSpec: "10m급", newLocation: "", newInDate: "" });
@@ -795,10 +833,10 @@ function RequestScreen({ tls, teams, currentUser, onSubmit, approvals }) {
         <div className="card-title mb8">승인 요청 작성</div>
         <label>요청 유형</label>
         <div className="sort-bar" style={{ marginBottom: 12 }}>
-          {["반입", "반출", "이동"].map(t => (
+          {["반입", "반출", "이관"].map(t => (
             <button key={t} className={`sort-btn${type === t ? " active" : ""}`}
               onClick={() => { setType(t); setForm({ tlId: "", to: "", reason: "", newSn: "", newSpec: "10m급", newLocation: "", newInDate: "" }); }}>
-              {t === "반입" ? "📥 반입" : t === "반출" ? "📤 반출" : "🔄 이동"}
+              {t === "반입" ? "📥 반입" : t === "반출" ? "📤 반출" : "🔄 이관"}
             </button>
           ))}
         </div>
@@ -820,7 +858,7 @@ function RequestScreen({ tls, teams, currentUser, onSubmit, approvals }) {
         )}
 
         {/* 반출/이동: 기존 TL 선택 */}
-        {(type === "반출" || type === "이동") && (
+        {(type === "반출" || type === "이관") && (
           <>
             <label>대상 TL</label>
             <select value={form.tlId} onChange={e => setForm({ ...form, tlId: e.target.value })}>
@@ -831,7 +869,7 @@ function RequestScreen({ tls, teams, currentUser, onSubmit, approvals }) {
         )}
 
         {/* 이동: 목적지 팀 선택 */}
-        {type === "이동" && (
+        {type === "이관" && (
           <>
             <label>목적지 팀</label>
             <select value={form.to} onChange={e => setForm({ ...form, to: e.target.value })}>
@@ -865,6 +903,111 @@ function RequestScreen({ tls, teams, currentUser, onSubmit, approvals }) {
   );
 }
 
+// ── 대여 화면 ─────────────────────────────────────────────────────────────
+function RentalScreen({ tls, teams, currentUser, rentals, onRent, onReturn }) {
+  const [toTeam, setToTeam] = useState("");
+  const [tlId, setTlId] = useState("");
+  const today = new Date().toISOString().slice(0, 10);
+
+  const myTls = tls.filter(t => t.team === currentUser.team && !t.isRented);
+  const otherTeams = teams.filter(t => t.name !== currentUser.team && t.bl === currentUser.bl);
+
+  // 내가 빌려준 것 (오늘)
+  const lentOut = rentals.filter(r => r.fromTeam === currentUser.team && r.date === today && r.status === "대여중");
+  // 내가 빌린 것 (오늘)
+  const borrowed = rentals.filter(r => r.toTeam === currentUser.team && r.date === today && r.status === "대여중");
+  // 전체 오늘 대여 로그
+  const todayLogs = rentals.filter(r => r.date === today);
+
+  async function handleRent() {
+    if (!tlId) { alert("대여할 TL을 선택해주세요."); return; }
+    if (!toTeam) { alert("대여받을 팀을 선택해주세요."); return; }
+    const tl = tls.find(t => t.id === tlId);
+    if (!window.confirm(`${tl?.sn}을 ${toTeam}에게 오늘 하루 대여하시겠습니까?
+자정이 지나면 자동으로 반환됩니다.`)) return;
+    await onRent(currentUser.team, toTeam, tlId, tl?.sn, currentUser.bl);
+    setTlId(""); setToTeam("");
+    alert("대여가 완료되었습니다.");
+  }
+
+  return (
+    <div>
+      {/* 대여하기 */}
+      <div className="card mb12">
+        <div className="card-title mb8">🔄 TL 대여하기</div>
+        <div className="alert alert-info mb12" style={{ fontSize: 12 }}>
+          결재 없이 진행되며, 자정에 자동 반환됩니다. 로그는 자동으로 남습니다.
+        </div>
+        <label>대여할 TL</label>
+        <select value={tlId} onChange={e => setTlId(e.target.value)}>
+          <option value="">선택해주세요</option>
+          {myTls.map(t => <option key={t.id} value={t.id}>{t.sn} ({t.location})</option>)}
+        </select>
+        <label>대여받을 팀</label>
+        <select value={toTeam} onChange={e => setToTeam(e.target.value)}>
+          <option value="">선택해주세요</option>
+          {otherTeams.map(t => <option key={t.id}>{t.name}</option>)}
+        </select>
+        <button className="btn btn-primary full" onClick={handleRent}>대여 확정</button>
+      </div>
+
+      {/* 내가 빌려준 TL */}
+      {lentOut.length > 0 && (
+        <>
+          <div className="section-title">내가 빌려준 TL ({lentOut.length}건)</div>
+          {lentOut.map(r => (
+            <div key={r.id} className="card">
+              <div className="card-header">
+                <div>
+                  <div className="card-title">{r.tlSn}</div>
+                  <div className="card-sub">{r.toTeam}에게 대여중</div>
+                </div>
+                <span className="pill pill-amber">대여중</span>
+              </div>
+              <button className="btn btn-sm btn-danger" style={{ marginTop: 8 }}
+                onClick={() => { if (window.confirm("조기 반환하시겠습니까?")) onReturn(r.id, r.tlId, r.fromTeam); }}>
+                조기 반환
+              </button>
+            </div>
+          ))}
+        </>
+      )}
+
+      {/* 내가 빌린 TL */}
+      {borrowed.length > 0 && (
+        <>
+          <div className="section-title">내가 빌린 TL ({borrowed.length}건)</div>
+          {borrowed.map(r => (
+            <div key={r.id} className="card">
+              <div className="card-header">
+                <div>
+                  <div className="card-title">{r.tlSn}</div>
+                  <div className="card-sub">{r.fromTeam}에서 대여</div>
+                </div>
+                <span className="pill pill-green">사용가능</span>
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
+      {/* 오늘 대여 로그 */}
+      <div className="section-title">오늘 대여 로그 ({todayLogs.length}건)</div>
+      {todayLogs.length === 0 && <div className="empty">오늘 대여 내역이 없습니다.</div>}
+      {todayLogs.map(r => (
+        <div key={r.id} className="approval-card">
+          <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+            <span className="approval-type type-move">대여</span>
+            <span className={`pill ${r.status === "대여중" ? "pill-amber" : "pill-green"}`}>{r.status}</span>
+          </div>
+          <div className="approval-title">{r.fromTeam} → {r.toTeam} · {r.tlSn}</div>
+          <div className="approval-meta">{r.date}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── 가동률 히스토리 ───────────────────────────────────────────────────────
 function HistoryScreen({ tls, teams, workLogs, currentUser }) {
   const [history, setHistory] = useState([]);
@@ -872,6 +1015,7 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
   const [saving, setSaving] = useState(false);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [rateMode, setRateMode] = useState("count"); // count | time
 
   useEffect(() => { fetchHistory(); }, []);
 
@@ -933,34 +1077,46 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
 
       <div className="section-title">일별 TL 가동률 ({filtered.length}건)</div>
       {filtered.length === 0 && <div className="empty">해당 기간의 기록이 없습니다.</div>}
+      {/* 기준 선택 탭 */}
+      <div className="sort-bar" style={{ marginBottom: 12 }}>
+        <span className="sort-label">기준</span>
+        <button className={`sort-btn${rateMode === "count" ? " active" : ""}`} onClick={() => setRateMode("count")}>📦 대수 기준</button>
+        <button className={`sort-btn${rateMode === "time" ? " active" : ""}`} onClick={() => setRateMode("time")}>⏱ 시간 기준</button>
+      </div>
+
       {filtered.map(h => {
         const totalAll = h.data?.reduce((s, d) => s + (d.total || 0), 0) || 0;
         const usedAll = h.data?.reduce((s, d) => s + (d.used || 0), 0) || 0;
         const totalMinAll = h.data?.reduce((s, d) => s + (d.totalMin || 0), 0) || 0;
-        const rate = totalAll > 0 ? Math.round((usedAll / totalAll) * 100) : 0;
+        const rateCount = totalAll > 0 ? Math.round((usedAll / totalAll) * 100) : 0;
         const rateTime = h.data?.length > 0 ? Math.round(h.data.reduce((s, d) => s + (d.rateTime || 0), 0) / h.data.length) : 0;
-        const rateColor = rateTime >= 50 ? "#1D9E75" : rateTime >= 25 ? "#BA7517" : "#E24B4A";
+        const displayRate = rateMode === "count" ? rateCount : rateTime;
+        const rateColor = displayRate >= 70 ? "#1D9E75" : displayRate >= 40 ? "#BA7517" : "#E24B4A";
         return (
           <div key={h.id} className="card">
             <div className="card-header">
               <div className="card-title">{h.date}</div>
               <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: rateColor }}>시간기준 {rateTime}%</div>
-                <div style={{ fontSize: 11, color: "#999" }}>대수기준 {rate}%</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: rateColor }}>{displayRate}%</div>
+                <div style={{ fontSize: 11, color: "#aaa" }}>{rateMode === "count" ? "대수 기준" : "시간 기준"}</div>
               </div>
             </div>
             <div style={{ fontSize: 12, color: "#999", marginBottom: 12 }}>
-              전체 {totalAll}대 · 총 {Math.floor(totalMinAll / 60)}시간 {totalMinAll % 60}분 사용
+              전체 {totalAll}대 · 사용 {usedAll}대 · 총 {Math.floor(totalMinAll / 60)}시간 {totalMinAll % 60}분
             </div>
             {h.data?.map((d, i) => {
-              const r = d.rateTime || 0;
-              const rc = r >= 50 ? "#1D9E75" : r >= 25 ? "#EF9F27" : "#E24B4A";
+              const r = rateMode === "count"
+                ? (d.total > 0 ? Math.round((d.used / d.total) * 100) : 0)
+                : (d.rateTime || 0);
+              const rc = r >= 70 ? "#1D9E75" : r >= 40 ? "#EF9F27" : "#E24B4A";
               return (
                 <div key={i} style={{ marginBottom: 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
                     <span style={{ fontWeight: 600 }}>{d.team} {d.bl && <span style={{ color: "#aaa", fontSize: 11 }}>({d.bl})</span>}</span>
                     <span style={{ color: "#666" }}>
-                      {Math.floor((d.totalMin || 0) / 60)}h {(d.totalMin || 0) % 60}m · {r}%
+                      {rateMode === "count"
+                        ? `${d.used}/${d.total}대 · ${r}%`
+                        : `${Math.floor((d.totalMin||0)/60)}h ${(d.totalMin||0)%60}m · ${r}%`}
                     </span>
                   </div>
                   <div className="rate-bar-bg">
