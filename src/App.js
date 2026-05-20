@@ -664,17 +664,22 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
   const [editingId, setEditingId] = useState(null);
   const [addForm, setAddForm] = useState({ sn: "", team: "", location: "", spec: "10m급", status: "정상", inDate: "", memo: "", bl: "" });
   const [editForm, setEditForm] = useState({});
+  const [blFilter, setBlFilter] = useState("1BL");
   const [sortBy, setSortBy] = useState("team");
+  const [sortSub, setSortSub] = useState("none"); // none | sn | spec
   const [search, setSearch] = useState("");
 
   const isManager = currentUser.role === "sojangnm" || currentUser.role === "admin";
   const isTeam = currentUser.role === "team";
+  const isSojangnm = currentUser.role === "sojangnm";
 
   const myTls = isTeam
     ? tls.filter(t => t.team === currentUser.team)
     : currentUser.role === "admin"
       ? tls.filter(t => { const team = teams.find(tm => tm.name === t.team); return team?.bl === currentUser.bl; })
-      : [...tls];
+      : isSojangnm
+        ? (blFilter === "전체" ? [...tls] : tls.filter(t => { const team = teams.find(tm => tm.name === t.team); return (t.bl || team?.bl) === blFilter; }))
+        : [...tls];
 
   const [statusFilter, setStatusFilter] = useState("전체");
   const STATUS_FILTERS = ["전체", "정상", "점검", "고장", "사용안함"];
@@ -692,7 +697,13 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
   });
 
   const sorted = [...filtered].sort((a, b) => {
-    if (sortBy === "team") return (a.team || "").localeCompare(b.team || "");
+    if (sortBy === "team") {
+      const teamCmp = (a.team || "").localeCompare(b.team || "");
+      if (teamCmp !== 0) return teamCmp;
+      if (sortSub === "sn") return (a.sn || "").localeCompare(b.sn || "");
+      if (sortSub === "spec") return (a.spec || "").localeCompare(b.spec || "");
+      return 0;
+    }
     if (sortBy === "sn") return (a.sn || "").localeCompare(b.sn || "");
     if (sortBy === "spec") return (a.spec || "").localeCompare(b.spec || "");
     return 0;
@@ -708,9 +719,18 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
     setShowAddForm(false);
   }
 
+  function normalizeSn(sn) { return (sn || "").replace(/\s/g, "").toUpperCase(); }
+
   async function handleAdd() {
     if (!addForm.sn) { alert("일련번호를 입력해주세요."); return; }
     if (!addForm.team) { alert("담당 팀을 선택해주세요."); return; }
+    // 중복 체크 (공백 제거 + 대소문자 무시)
+    const inputNorm = normalizeSn(addForm.sn);
+    const duplicate = tls.find(t => normalizeSn(t.sn) === inputNorm);
+    if (duplicate) {
+      alert(`이미 등록된 일련번호입니다.\n기존 등록: ${duplicate.sn} (${duplicate.team})`);
+      return;
+    }
     const team = teams.find(t => t.name === addForm.team);
     await onAdd({ ...addForm, bl: team?.bl || "", inDate: addForm.inDate || new Date().toISOString().slice(0, 10) });
     setAddForm({ sn: "", team: "", location: "", spec: "10m급", status: "정상", inDate: "", memo: "", bl: "" });
@@ -740,11 +760,21 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
 
       {isManager && <button className="btn btn-primary full mb12" onClick={() => { setShowAddForm(!showAddForm); setEditingId(null); }}>+ 장비 등록</button>}
 
+      {/* 소장: 공구 필터 */}
+      {isSojangnm && (
+        <div className="sort-bar" style={{ marginBottom: 10 }}>
+          <span className="sort-label">공구</span>
+          {["1BL", "2BL", "전체"].map(bl => (
+            <button key={bl} className={`sort-btn${blFilter === bl ? " active" : ""}`} onClick={() => setBlFilter(bl)}>{bl}</button>
+          ))}
+        </div>
+      )}
+
       {/* 검색창 */}
       <input
         value={search}
         onChange={e => setSearch(e.target.value)}
-        placeholder="🔍 일련번호 검색 (일부만 입력해도 됩니다)"
+        placeholder="🔍 일련번호 검색"
         style={{ marginBottom: 8 }}
       />
       {/* 상태 필터 탭 */}
@@ -786,11 +816,25 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
       )}
 
       {isManager && (
-        <div className="sort-bar">
+        <div className="sort-bar" style={{ marginBottom: 4 }}>
           <span className="sort-label">정렬</span>
-          {[["team", "팀별"], ["sn", "일련번호순"], ["spec", "규격순"]].map(([val, label]) => (
-            <button key={val} className={`sort-btn${sortBy === val ? " active" : ""}`} onClick={() => setSortBy(val)}>{label}</button>
-          ))}
+          <button className={`sort-btn${sortBy === "team" ? " active" : ""}`}
+            onClick={() => { setSortBy("team"); setSortSub("none"); }}>팀별</button>
+          <button className={`sort-btn${sortBy === "sn" || (sortBy === "team" && sortSub === "sn") ? " active" : ""}`}
+            onClick={() => {
+              if (sortBy === "team") { setSortSub(sortSub === "sn" ? "none" : "sn"); }
+              else { setSortBy("sn"); setSortSub("none"); }
+            }}>일련번호순</button>
+          <button className={`sort-btn${sortBy === "spec" || (sortBy === "team" && sortSub === "spec") ? " active" : ""}`}
+            onClick={() => {
+              if (sortBy === "team") { setSortSub(sortSub === "spec" ? "none" : "spec"); }
+              else { setSortBy("spec"); setSortSub("none"); }
+            }}>규격순</button>
+        </div>
+      )}
+      {isManager && sortBy === "team" && sortSub !== "none" && (
+        <div style={{ fontSize: 11, color: "#534AB7", marginBottom: 8, paddingLeft: 2 }}>
+          팀별 + {sortSub === "sn" ? "일련번호순" : "규격순"} 정렬 중
         </div>
       )}
 
