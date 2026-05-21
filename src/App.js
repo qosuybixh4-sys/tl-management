@@ -446,14 +446,18 @@ function Popup({ title, count, children, onClose }) {
 }
 
 function TeamPopup({ title, teams, tls, onClose }) {
+  const totalTls = teams.reduce((s, t) => s + tls.filter(tl => tl.team === t.name).length, 0);
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal" style={{ maxHeight: "80vh", display: "flex", flexDirection: "column" }} onClick={e => e.stopPropagation()}>
         <div className="modal-title">{title}</div>
-        <div className="alert alert-info mb12" style={{ fontSize: 13, padding: "8px 12px" }}>등록 팀 {teams.length}개</div>
+        <div className="alert alert-info mb12" style={{ fontSize: 13, padding: "8px 12px" }}>
+          등록 팀 <strong>{teams.length}개</strong> · 전체 TL <strong>{totalTls}대</strong>
+        </div>
         <div style={{ overflowY: "auto", flex: 1 }}>
           {teams.map(team => {
             const cnt = tls.filter(t => t.team === team.name).length;
+            const use = tls.filter(t => t.team === team.name && t.todayUse).length;
             return (
               <div key={team.id} className="team-row" style={{ borderBottom: "1px solid #f0f0f0", paddingBottom: 10, marginBottom: 10 }}>
                 <div className="team-avatar">{team.name.slice(0, 2)}</div>
@@ -461,7 +465,10 @@ function TeamPopup({ title, teams, tls, onClose }) {
                   <div className="tl-sn">{team.name}</div>
                   {team.leader && <div className="tl-meta">{team.leader}</div>}
                 </div>
-                <span className="pill pill-purple">TL {cnt}대</span>
+                <div style={{ textAlign: "right" }}>
+                  <span className="pill pill-purple">TL {cnt}대</span>
+                  {use > 0 && <div style={{ fontSize: 11, color: "#1D9E75", marginTop: 3 }}>금일 {use}대 사용</div>}
+                </div>
               </div>
             );
           })}
@@ -567,39 +574,86 @@ function OverviewScreen({ tls, teams, approvals, currentUser }) {
           ))}
         </div>
 
-        {/* 팀별 현황 (접기/펼치기) */}
+        {/* 팀별 현황 - 2단계 접기/펼치기 (공구 → 팀 → TL) */}
         <div className="section-title">팀별 현황</div>
-        {fteams.map(team => {
+        {["1BL", "2BL"].map(blKey => {
+          const blTeams = fteams.filter(t => t.bl === blKey);
+          if (blTeams.length === 0) return null;
+          const blTlCount = blTeams.reduce((s, t) => s + tls.filter(tl => tl.team === t.name).length, 0);
+          const blExpanded = expandedTeams[`__bl_${blKey}`] === true; // 기본 접힘
+          return (
+            <div key={blKey} className="card" style={{ marginBottom: 8, padding: 0, overflow: "hidden" }}>
+              {/* 공구 헤더 */}
+              <div style={{ display: "flex", alignItems: "center", padding: "12px 14px", cursor: "pointer", background: blExpanded ? "#f8f7ff" : "#fff" }}
+                onClick={() => setExpandedTeams(prev => ({ ...prev, [`__bl_${blKey}`]: !blExpanded }))}>
+                <span className={`pill pill-bl`} style={{ marginRight: 8 }}>{blKey}</span>
+                <span style={{ fontSize: 14, fontWeight: 600, flex: 1 }}>{blTeams.length}개 팀 · {blTlCount}대</span>
+                <span style={{ fontSize: 12, color: "#aaa" }}>{blExpanded ? "▲" : "▼"}</span>
+              </div>
+              {/* 팀 목록 */}
+              {blExpanded && (
+                <div style={{ borderTop: "1px solid #f0f0f0" }}>
+                  {blTeams.map(team => {
+                    const myTls = tls.filter(t => t.team === team.name);
+                    const use = myTls.filter(t => t.todayUse).length;
+                    const teamExpanded = expandedTeams[team.name] === true; // 기본 접힘
+                    return (
+                      <div key={team.id} style={{ borderBottom: "1px solid #f5f5f5" }}>
+                        {/* 팀 헤더 */}
+                        <div style={{ display: "flex", alignItems: "center", padding: "10px 14px", cursor: "pointer", background: teamExpanded ? "#fafafa" : "#fff" }}
+                          onClick={() => setExpandedTeams(prev => ({ ...prev, [team.name]: !teamExpanded }))}>
+                          <div className="team-avatar" style={{ width: 28, height: 28, fontSize: 11, marginRight: 8 }}>{team.name.slice(0, 2)}</div>
+                          <span style={{ fontSize: 13, fontWeight: 500, flex: 1 }}>{team.name}</span>
+                          <span className="pill" style={{ marginRight: 6 }}>보유 {myTls.length}대 · {use}대 사용</span>
+                          <span style={{ fontSize: 11, color: "#aaa" }}>{teamExpanded ? "▲" : "▼"}</span>
+                        </div>
+                        {/* TL 목록 */}
+                        {teamExpanded && (
+                          <div style={{ padding: "4px 14px 10px", background: "#fafafa" }}>
+                            {myTls.length === 0 && <p className="empty-sm">보유 장비 없음</p>}
+                            {myTls.map(t => (
+                              <div key={t.id} className="tl-row" style={{ padding: "6px 0" }}>
+                                <span className={`dot dot-${t.status === "정상" ? "ok" : t.status === "고장" ? "broken" : "check"}`} />
+                                <span className="tl-sn">{t.sn}</span>
+                                {t.spec && <span className="pill pill-gray">{t.spec}</span>}
+                                <span className="tl-meta">{t.location}</span>
+                                {t.todayUse && <span className="pill pill-purple">사용중</span>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {/* 공구 미배정 팀 */}
+        {fteams.filter(t => !t.bl || (t.bl !== "1BL" && t.bl !== "2BL")).map(team => {
           const myTls = tls.filter(t => t.team === team.name);
           const use = myTls.filter(t => t.todayUse).length;
-          const expanded = expandedTeams[team.name] !== false; // 기본 펼침
+          const expanded = expandedTeams[team.name] === true;
           return (
             <div key={team.id} className="card" style={{ marginBottom: 8 }}>
               <div className="card-header" style={{ cursor: "pointer", marginBottom: expanded ? 8 : 0 }}
-                onClick={() => toggleTeam(team.name)}>
-                <div>
-                  <span className="card-title">{team.name}</span>
-                  {team.bl && <span className="pill pill-bl" style={{ marginLeft: 6 }}>{team.bl}</span>}
-                </div>
+                onClick={() => setExpandedTeams(prev => ({ ...prev, [team.name]: !expanded }))}>
+                <span className="card-title">{team.name}</span>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span className="pill">보유 {myTls.length}대 · {use}대 사용</span>
                   <span style={{ fontSize: 12, color: "#aaa" }}>{expanded ? "▲" : "▼"}</span>
                 </div>
               </div>
-              {expanded && (
-                <>
-                  {myTls.length === 0 && <p className="empty-sm">보유 장비 없음</p>}
-                  {myTls.map(t => (
-                    <div key={t.id} className="tl-row">
-                      <span className={`dot dot-${t.status === "정상" ? "ok" : t.status === "고장" ? "broken" : "check"}`} />
-                      <span className="tl-sn">{t.sn}</span>
-                      {t.spec && <span className="pill pill-gray">{t.spec}</span>}
-                      <span className="tl-meta">{t.location}</span>
-                      {t.todayUse && <span className="pill pill-purple">사용중</span>}
-                    </div>
-                  ))}
-                </>
-              )}
+              {expanded && myTls.map(t => (
+                <div key={t.id} className="tl-row">
+                  <span className={`dot dot-${t.status === "정상" ? "ok" : t.status === "고장" ? "broken" : "check"}`} />
+                  <span className="tl-sn">{t.sn}</span>
+                  {t.spec && <span className="pill pill-gray">{t.spec}</span>}
+                  <span className="tl-meta">{t.location}</span>
+                  {t.todayUse && <span className="pill pill-purple">사용중</span>}
+                </div>
+              ))}
             </div>
           );
         })}
@@ -685,7 +739,10 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
   const STATUS_FILTERS = ["전체", "정상", "점검", "고장", "사용안함"];
 
   const filtered = myTls.filter(t => {
-    const matchSearch = !search || (t.sn || "").toLowerCase().includes(search.toLowerCase());
+    const q = search.toLowerCase();
+    const matchSearch = !search
+      || (t.sn || "").toLowerCase().includes(q)
+      || (t.team || "").toLowerCase().includes(q);
     const matchStatus = statusFilter === "전체"
       ? true
       : statusFilter === "정상" ? t.status === "정상"
@@ -774,7 +831,7 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
       <input
         value={search}
         onChange={e => setSearch(e.target.value)}
-        placeholder="🔍 일련번호 검색"
+        placeholder="🔍 일련번호 또는 팀 이름 검색"
         style={{ marginBottom: 8 }}
       />
       {/* 상태 필터 탭 */}
