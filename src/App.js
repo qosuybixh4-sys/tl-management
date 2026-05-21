@@ -209,6 +209,7 @@ export default function App() {
   // 작업 로그
   async function startWork(user, tlId) {
     const tl = tls.find(t => t.id === tlId);
+    const now = new Date().toISOString(); // 클라이언트 로컬 시간 (오프라인에서도 정확)
     await addDoc(collection(db, "workLogs"), {
       driverId: user.id,
       driverName: user.label,
@@ -216,7 +217,7 @@ export default function App() {
       tlId: tlId || "",
       tlSn: tl?.sn || "미지정",
       bl: user.bl || "",
-      startedAt: serverTimestamp(),
+      startedAt: now,
       endedAt: null,
       durationMin: null,
       date: new Date().toISOString().slice(0, 10),
@@ -224,9 +225,25 @@ export default function App() {
   }
   async function endWork(logId, startedAt) {
     const now = new Date();
-    const start = startedAt?.toDate ? startedAt.toDate() : new Date(startedAt);
-    const durationMin = Math.round((now - start) / 60000);
-    await updateDoc(doc(db, "workLogs", logId), { endedAt: serverTimestamp(), durationMin });
+    const endedAt = now.toISOString();
+    // startedAt이 ISO 문자열, Firebase Timestamp, null 등 다양한 경우 안전하게 처리
+    let start;
+    if (!startedAt) {
+      // startedAt이 없으면 종료 불가 - 1분으로 기본값
+      start = new Date(now.getTime() - 60000);
+    } else if (typeof startedAt === 'string') {
+      start = new Date(startedAt);
+    } else if (startedAt?.toDate) {
+      start = startedAt.toDate();
+    } else {
+      start = new Date(startedAt);
+    }
+    // 음수나 비정상 값 방어
+    const diffMs = now - start;
+    const durationMin = diffMs > 0 && diffMs < 86400000 // 0~24시간 사이만 유효
+      ? Math.round(diffMs / 60000)
+      : 1; // 비정상이면 1분으로 처리
+    await updateDoc(doc(db, "workLogs", logId), { endedAt, durationMin });
   }
 
   // 대여 함수
@@ -997,7 +1014,8 @@ function TodayScreen({ tls, currentUser, onToggle, onPurpose, onNotUsed, workLog
       </div>
       {myTls.map(t => {
         const mins = getTlMinutes(t.id);
-        const rate = Math.round((mins / (WORK_HOURS * 60)) * 100);
+        const maxMins = WORK_HOURS * 60; // 1대 기준 8시간
+        const rate = Math.min(Math.round((mins / maxMins) * 100), 100);
         return (
           <div key={t.id} className="card">
             <div className="today-row">
@@ -1336,13 +1354,16 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
       const teamTls = tls.filter(t => t.team === team.name);
       const todayLogs = workLogs.filter(l => l.date === today && teamTls.some(t => t.id === l.tlId) && l.durationMin != null);
       const totalMin = todayLogs.reduce((s, l) => s + l.durationMin, 0);
+      // 가동률 = 오늘 실제 사용 시간 / (기준 작업시간 * 보유 TL 대수) * 100
+      // 예: TL 3대, 기준 8시간 → 최대 24시간. 실제 6시간 사용 → 25%
+      const maxMin = WORK_HOURS * 60 * (teamTls.length || 1);
       return {
         team: team.name,
         bl: team.bl || "",
         total: teamTls.length,
         used: teamTls.filter(t => t.todayUse).length,
         totalMin,
-        rateTime: Math.round((totalMin / (WORK_HOURS * 60 * teamTls.length || 1)) * 100),
+        rateTime: Math.min(Math.round((totalMin / maxMin) * 100), 100),
       };
     });
     await setDoc(doc(db, "history", today), { date: today, data: snapshot, savedAt: serverTimestamp() });
@@ -1466,7 +1487,20 @@ function DriverScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
 
   useEffect(() => {
     if (activeLog) {
-      const start = activeLog.startedAt?.toDate ? activeLog.startedAt.toDate() : new Date();
+      // startedAt이 ISO 문자열 또는 Timestamp 모두 안전하게 처리
+      let start;
+      if (!activeLog.startedAt) {
+        start = new Date(); // fallback: 지금부터
+      } else if (typeof activeLog.startedAt === 'string') {
+        start = new Date(activeLog.startedAt);
+      } else if (activeLog.startedAt?.toDate) {
+        start = activeLog.startedAt.toDate();
+      } else {
+        start = new Date();
+      }
+      // 시작 시간이 미래이거나 비정상이면 지금으로 초기화
+      if (isNaN(start.getTime()) || start > new Date()) start = new Date();
+
       timerRef.current = setInterval(() => {
         setElapsed(Math.floor((new Date() - start) / 1000));
       }, 1000);
@@ -1478,7 +1512,7 @@ function DriverScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
   }, [activeLog?.id]);
 
   const todayMin = myLogs.filter(l => l.durationMin != null).reduce((s, l) => s + l.durationMin, 0);
-  const todayRate = Math.round((todayMin / (WORK_HOURS * 60)) * 100);
+  const todayRate = Math.min(Math.round((todayMin / (WORK_HOURS * 60)) * 100), 100);
 
   function fmt(sec) {
     const h = Math.floor(sec / 3600);
@@ -1545,8 +1579,8 @@ function DriverScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
               : <span className="pill pill-amber">진행중</span>}
           </div>
           <div style={{ fontSize: 12, color: "#999", marginTop: 4 }}>
-            시작: {l.startedAt?.toDate?.().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) || "-"}
-            {l.endedAt && ` · 종료: ${l.endedAt.toDate?.().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`}
+            시작: {l.startedAt ? new Date(typeof l.startedAt === 'string' ? l.startedAt : l.startedAt?.toDate?.() || l.startedAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "-"}
+            {l.endedAt ? ` · 종료: ${new Date(typeof l.endedAt === 'string' ? l.endedAt : l.endedAt?.toDate?.() || l.endedAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}` : ""}
           </div>
         </div>
       ))}
