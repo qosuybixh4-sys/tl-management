@@ -1313,6 +1313,7 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [rateMode, setRateMode] = useState("count"); // count | time
+  const [blTab, setBlTab] = useState("1BL"); // 1BL | 2BL | 전체
 
   useEffect(() => { fetchHistory(); }, []);
 
@@ -1353,6 +1354,13 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
     return true;
   });
 
+  // 공구 탭에 따라 data 필터링
+  function filterData(data) {
+    if (!data) return [];
+    if (blTab === "전체") return data;
+    return data.filter(d => d.bl === blTab);
+  }
+
   if (loading) return <div className="empty">불러오는 중...</div>;
 
   return (
@@ -1360,6 +1368,21 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
       <button className="btn btn-primary full mb12" onClick={saveToday} disabled={saving}>
         {saving ? "저장 중..." : "📋 오늘 현황 기록 저장"}
       </button>
+
+      {/* 공구 탭 */}
+      <div className="sort-bar" style={{ marginBottom: 10 }}>
+        <span className="sort-label">공구</span>
+        {["1BL", "2BL", "전체"].map(bl => (
+          <button key={bl} className={`sort-btn${blTab === bl ? " active" : ""}`} onClick={() => setBlTab(bl)}>{bl}</button>
+        ))}
+      </div>
+
+      {/* 기준 선택 탭 */}
+      <div className="sort-bar" style={{ marginBottom: 12 }}>
+        <span className="sort-label">기준</span>
+        <button className={`sort-btn${rateMode === "count" ? " active" : ""}`} onClick={() => setRateMode("count")}>📦 대수</button>
+        <button className={`sort-btn${rateMode === "time" ? " active" : ""}`} onClick={() => setRateMode("time")}>⏱ 시간</button>
+      </div>
 
       {/* 날짜 필터 */}
       <div className="card mb12">
@@ -1372,21 +1395,19 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
         </div>
       </div>
 
-      <div className="section-title">일별 TL 가동률 ({filtered.length}건)</div>
-      {filtered.length === 0 && <div className="empty">해당 기간의 기록이 없습니다.</div>}
-      {/* 기준 선택 탭 */}
-      <div className="sort-bar" style={{ marginBottom: 12 }}>
-        <span className="sort-label">기준</span>
-        <button className={`sort-btn${rateMode === "count" ? " active" : ""}`} onClick={() => setRateMode("count")}>📦 대수 기준</button>
-        <button className={`sort-btn${rateMode === "time" ? " active" : ""}`} onClick={() => setRateMode("time")}>⏱ 시간 기준</button>
+      <div className="section-title">
+        {blTab} 일별 TL 가동률 ({filtered.length}건) · {rateMode === "count" ? "대수 기준" : "시간 기준"}
       </div>
+      {filtered.length === 0 && <div className="empty">해당 기간의 기록이 없습니다.</div>}
 
       {filtered.map(h => {
-        const totalAll = h.data?.reduce((s, d) => s + (d.total || 0), 0) || 0;
-        const usedAll = h.data?.reduce((s, d) => s + (d.used || 0), 0) || 0;
-        const totalMinAll = h.data?.reduce((s, d) => s + (d.totalMin || 0), 0) || 0;
+        const visibleData = filterData(h.data);
+        if (visibleData.length === 0) return null;
+        const totalAll = visibleData.reduce((s, d) => s + (d.total || 0), 0);
+        const usedAll = visibleData.reduce((s, d) => s + (d.used || 0), 0);
+        const totalMinAll = visibleData.reduce((s, d) => s + (d.totalMin || 0), 0);
         const rateCount = totalAll > 0 ? Math.round((usedAll / totalAll) * 100) : 0;
-        const rateTime = h.data?.length > 0 ? Math.round(h.data.reduce((s, d) => s + (d.rateTime || 0), 0) / h.data.length) : 0;
+        const rateTime = visibleData.length > 0 ? Math.round(visibleData.reduce((s, d) => s + (d.rateTime || 0), 0) / visibleData.length) : 0;
         const displayRate = rateMode === "count" ? rateCount : rateTime;
         const rateColor = displayRate >= 70 ? "#1D9E75" : displayRate >= 40 ? "#BA7517" : "#E24B4A";
         return (
@@ -1401,7 +1422,7 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
             <div style={{ fontSize: 12, color: "#999", marginBottom: 12 }}>
               전체 {totalAll}대 · 사용 {usedAll}대 · 총 {Math.floor(totalMinAll / 60)}시간 {totalMinAll % 60}분
             </div>
-            {h.data?.map((d, i) => {
+            {visibleData.map((d, i) => {
               const r = rateMode === "count"
                 ? (d.total > 0 ? Math.round((d.used / d.total) * 100) : 0)
                 : (d.rateTime || 0);
@@ -1409,7 +1430,9 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
               return (
                 <div key={i} style={{ marginBottom: 10 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-                    <span style={{ fontWeight: 600 }}>{d.team} {d.bl && <span style={{ color: "#aaa", fontSize: 11 }}>({d.bl})</span>}</span>
+                    <span style={{ fontWeight: 600 }}>{d.team}
+                      {blTab === "전체" && d.bl && <span style={{ color: "#aaa", fontSize: 11 }}> ({d.bl})</span>}
+                    </span>
                     <span style={{ color: "#666" }}>
                       {rateMode === "count"
                         ? `${d.used}/${d.total}대 · ${r}%`
@@ -1536,6 +1559,8 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
   const [newPw, setNewPw] = useState("");
   const [driverModal, setDriverModal] = useState(false);
   const [driverForm, setDriverForm] = useState({ name: "", pw: "", bl: "1BL", teamName: "" });
+  const [adminModal, setAdminModal] = useState(false);
+  const [adminForm, setAdminForm] = useState({ name: "", pw: "", bl: "1BL" });
   const [err, setErr] = useState("");
 
   const systemAccounts = accounts.filter(a => a.role === "sojangnm");
@@ -1573,6 +1598,15 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
     setDriverModal(false); setDriverForm({ name: "", pw: "", bl: "1BL", teamName: "" }); setErr("");
   }
 
+  async function handleAddAdmin() {
+    if (!adminForm.name || !adminForm.pw) { setErr("이름과 비밀번호를 입력해주세요."); return; }
+    if (accounts.find(a => a.id === adminForm.name)) { setErr("이미 존재하는 계정 이름입니다."); return; }
+    await setDoc(doc(db, "accounts", adminForm.name), {
+      pw: adminForm.pw, role: "admin", label: adminForm.name, bl: adminForm.bl
+    });
+    setAdminModal(false); setAdminForm({ name: "", pw: "", bl: "1BL" }); setErr("");
+  }
+
   return (
     <div>
       <div className="section-title" style={{ marginTop: 0 }}>시스템 계정</div>
@@ -1599,8 +1633,9 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         <button className="btn btn-primary flex1" onClick={() => { setModal({ type: "add" }); setForm({ name: "", leader: "", pw: "", bl: "1BL" }); setErr(""); }}>+ 팀 추가</button>
+        <button className="btn flex1" onClick={() => { setAdminModal(true); setAdminForm({ name: "", pw: "", bl: "1BL" }); setErr(""); }}>+ 관리자 추가</button>
         <button className="btn flex1" onClick={() => { setDriverModal(true); setDriverForm({ name: "", pw: "", bl: "1BL", teamName: "" }); setErr(""); }}>+ 운전원 추가</button>
       </div>
 
@@ -1697,6 +1732,28 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
             <div className="btn-row mt8">
               <button className="btn btn-primary flex1" onClick={handleAddDriver}>추가</button>
               <button className="btn flex1" onClick={() => { setDriverModal(false); setErr(""); }}>취소</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 관리자 추가 모달 */}
+      {adminModal && (
+        <div className="modal-bg" onClick={() => setAdminModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">🔧 관리자 계정 추가</div>
+            {err && <div className="alert alert-warn mb8">{err}</div>}
+            <label>소속 공구</label>
+            <select value={adminForm.bl} onChange={e => setAdminForm({ ...adminForm, bl: e.target.value })}>
+              <option>1BL</option><option>2BL</option>
+            </select>
+            <label>관리자 이름 (계정 ID)</label>
+            <input value={adminForm.name} onChange={e => setAdminForm({ ...adminForm, name: e.target.value })} placeholder="예: 홍길동 관리자" />
+            <label>비밀번호</label>
+            <input type="password" value={adminForm.pw} onChange={e => setAdminForm({ ...adminForm, pw: e.target.value })} placeholder="비밀번호 입력" />
+            <div className="btn-row mt8">
+              <button className="btn btn-primary flex1" onClick={handleAddAdmin}>추가</button>
+              <button className="btn flex1" onClick={() => { setAdminModal(false); setErr(""); }}>취소</button>
             </div>
           </div>
         </div>
