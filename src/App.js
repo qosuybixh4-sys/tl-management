@@ -7,7 +7,6 @@ import { db } from "./firebase";
 import "./App.css";
 
 const TL_SPECS = ["7.8m급", "10m급", "12m급", "기타"];
-const TL_FLOORS = ["B2F", "B1F", "1F", "2F", "3F", "4F", "5F"];
 const BLS = ["1BL", "2BL"];
 const WORK_HOURS = 8; // 일일 기준 작업시간
 
@@ -21,19 +20,6 @@ const NAV_TABS = {
     { id: "teams", icon: "👥", label: "팀관리" },
   ],
   admin: [
-    { id: "overview", icon: "📊", label: "현황" },
-    { id: "tl", icon: "🏗", label: "장비목록" },
-    { id: "today", icon: "📅", label: "금일사용" },
-    { id: "approval", icon: "✅", label: "결재" },
-    { id: "history", icon: "📈", label: "가동률" },
-  ],
-  admin_construction: [
-    { id: "overview", icon: "📊", label: "현황" },
-    { id: "tl", icon: "🏗", label: "장비목록" },
-    { id: "approval", icon: "✅", label: "결재" },
-    { id: "history", icon: "📈", label: "가동률" },
-  ],
-  admin_safety: [
     { id: "overview", icon: "📊", label: "현황" },
     { id: "tl", icon: "🏗", label: "장비목록" },
     { id: "today", icon: "📅", label: "금일사용" },
@@ -95,9 +81,12 @@ export default function App() {
   async function initSystemAccounts() {
     const snap = await getDocs(collection(db, "accounts"));
     const existing = snap.docs.map(d => d.id);
-    for (const acc of SYSTEM_ACCOUNTS) {
+    const defaults = [
+      { id: "소장", pw: "1234", role: "sojangnm", label: "소장", bl: null },
+    ];
+    for (const acc of defaults) {
       if (!existing.includes(acc.id)) {
-        await setDoc(doc(db, "accounts", acc.id), { pw: acc.pw, role: acc.role, label: acc.label, bl: acc.bl });
+        await setDoc(doc(db, "accounts", acc.id), acc);
       }
     }
   }
@@ -108,7 +97,6 @@ export default function App() {
     if (!acc) return "존재하지 않는 계정입니다.";
     if (acc.pw !== pw) return "비밀번호가 올바르지 않습니다.";
     const user = { id: accountId, role: acc.role, label: acc.label || accountId, team: acc.team || null, bl: acc.bl || null, teamName: acc.teamName || null };
-    // admin_construction, admin_safety도 admin처럼 처리
     setCurrentUser(user);
     localStorage.setItem("tl_user", JSON.stringify(user));
     setActiveTab(NAV_TABS[acc.role][0].id);
@@ -282,27 +270,6 @@ export default function App() {
     });
   }, [rentals]);
 
-  // 자정 사용 현황 초기화
-  useEffect(() => {
-    if (tls.length === 0) return;
-    const today = new Date().toISOString().slice(0, 10);
-    const lastReset = localStorage.getItem("tl_last_reset");
-    if (lastReset === today) return; // 오늘 이미 초기화됨
-    // 어제 또는 그 이전 날짜면 초기화
-    if (lastReset && lastReset < today) {
-      tls.forEach(async tl => {
-        if (tl.todayUse || tl.todayPurpose || tl.notUsedReason) {
-          await updateDoc(doc(db, "tls", tl.id), {
-            todayUse: false,
-            todayPurpose: "",
-            notUsedReason: "",
-          });
-        }
-      });
-    }
-    localStorage.setItem("tl_last_reset", today);
-  }, [tls]);
-
   useEffect(() => {
     if (currentUser && !activeTab) {
       setActiveTab(NAV_TABS[currentUser.role]?.[0]?.id || "");
@@ -322,7 +289,7 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           {offline && <span className="offline-badge" title="전파 없음 - 작업 내용은 자동 저장 후 온라인 시 동기화됩니다">📵 오프라인</span>}
           {currentUser.bl && <span className="badge badge-bl">{currentUser.bl}</span>}
-          <span className={`badge badge-${currentUser.role === "admin_construction" ? "admin" : currentUser.role === "admin_safety" ? "admin" : currentUser.role}`}>{currentUser.label}</span>
+          <span className={`badge badge-${currentUser.role}`}>{currentUser.label}</span>
           <button className="btn-icon" onClick={doLogout} title="로그아웃">⎋</button>
         </div>
       </header>
@@ -371,15 +338,7 @@ function LoginScreen({ accounts, onLogin }) {
     if (error) setErr(error);
   }
 
-  const roleLabel = (role) => {
-    if (role === "admin") return "관리자";
-    if (role === "admin_construction") return "공사관리자";
-    if (role === "admin_safety") return "안전관리자";
-    if (role === "team") return "팀장";
-    if (role === "driver") return "TL 운전원";
-    if (role === "sojangnm") return "소장";
-    return role;
-  };
+  const roleLabel = (role) => role === "admin" ? "관리자" : role === "team" ? "팀장" : role === "driver" ? "TL 운전원" : role === "sojangnm" ? "소장" : role;
 
   return (
     <div className="login-wrap">
@@ -451,9 +410,7 @@ function LoginScreen({ accounts, onLogin }) {
 
 // ── TL 카드 (팝업용 공통 컴포넌트) ──────────────────────────────────────
 function TLCard({ t }) {
-  const isNotUsed = t.status === "정상" && !t.todayUse;
-  const dotClass = t.status === "고장" ? "broken" : t.status === "점검중" ? "check" : isNotUsed ? "unused" : "ok";
-  const statusLabel = t.status === "고장" ? "고장" : t.status === "점검중" ? "점검중" : isNotUsed ? "미사용" : "정상";
+  const dotClass = t.status === "정상" ? "ok" : t.status === "고장" ? "broken" : "check";
   return (
     <div className="card" style={{ marginBottom: 8 }}>
       <div className="card-header">
@@ -462,7 +419,7 @@ function TLCard({ t }) {
           <div className="card-sub">{t.location} · {t.team} · {t.bl}</div>
         </div>
         <span className="status-tag">
-          <span className={`dot dot-${dotClass}`} />{statusLabel}
+          <span className={`dot dot-${dotClass}`} />{t.status}
         </span>
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
@@ -769,14 +726,14 @@ function OverviewScreen({ tls, teams, approvals, currentUser }) {
 function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
-  const [addForm, setAddForm] = useState({ sn: "", team: "", location: "", floor: "", spec: "10m급", status: "정상", inDate: "", memo: "", bl: "" });
+  const [addForm, setAddForm] = useState({ sn: "", team: "", location: "", spec: "10m급", status: "정상", inDate: "", memo: "", bl: "" });
   const [editForm, setEditForm] = useState({});
   const [blFilter, setBlFilter] = useState("1BL");
   const [sortBy, setSortBy] = useState("team");
   const [sortSub, setSortSub] = useState("none"); // none | sn | spec
   const [search, setSearch] = useState("");
 
-  const isManager = ["sojangnm", "admin", "admin_construction", "admin_safety"].includes(currentUser.role);
+  const isManager = currentUser.role === "sojangnm" || currentUser.role === "admin";
   const isTeam = currentUser.role === "team";
   const isSojangnm = currentUser.role === "sojangnm";
 
@@ -825,7 +782,7 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
 
   function startEdit(t) {
     setEditingId(t.id);
-    setEditForm({ sn: t.sn, team: t.team, location: t.location || "", floor: t.floor || "", spec: t.spec || "10m급", status: t.status, inDate: t.inDate || "", memo: t.memo || "", bl: t.bl || "" });
+    setEditForm({ sn: t.sn, team: t.team, location: t.location || "", spec: t.spec || "10m급", status: t.status, inDate: t.inDate || "", memo: t.memo || "", bl: t.bl || "" });
     setShowAddForm(false);
   }
 
@@ -843,7 +800,7 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
     }
     const team = teams.find(t => t.name === addForm.team);
     await onAdd({ ...addForm, bl: team?.bl || "", inDate: addForm.inDate || new Date().toISOString().slice(0, 10) });
-    setAddForm({ sn: "", team: "", location: "", floor: "", spec: "10m급", status: "정상", inDate: "", memo: "", bl: "" });
+    setAddForm({ sn: "", team: "", location: "", spec: "10m급", status: "정상", inDate: "", memo: "", bl: "" });
     setShowAddForm(false);
   }
 
@@ -904,13 +861,8 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
             <option value="">선택해주세요</option>
             {availableTeams.map(t => <option key={t.id}>{t.name}</option>)}
           </select>
-          <label>층수</label>
-          <select value={addForm.floor} onChange={e => setAddForm({ ...addForm, floor: e.target.value })}>
-            <option value="">선택해주세요</option>
-            {TL_FLOORS.map(f => <option key={f}>{f}</option>)}
-          </select>
-          <label>위치 (세부 구역)</label>
-          <input value={addForm.location} onChange={e => setAddForm({ ...addForm, location: e.target.value })} placeholder="예: CMS 서측" />
+          <label>위치 (층/구역)</label>
+          <input value={addForm.location} onChange={e => setAddForm({ ...addForm, location: e.target.value })} placeholder="예: B2F 서측" />
           <label>규격</label>
           <select value={addForm.spec} onChange={e => setAddForm({ ...addForm, spec: e.target.value })}>
             {TL_SPECS.map(s => <option key={s}>{s}</option>)}
@@ -965,12 +917,7 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
               <select value={editForm.team} onChange={e => setEditForm({ ...editForm, team: e.target.value })}>
                 {availableTeams.map(t2 => <option key={t2.id}>{t2.name}</option>)}
               </select>
-              <label>층수</label>
-              <select value={editForm.floor || ""} onChange={e => setEditForm({ ...editForm, floor: e.target.value })}>
-                <option value="">선택해주세요</option>
-                {TL_FLOORS.map(f => <option key={f}>{f}</option>)}
-              </select>
-              <label>위치 (세부 구역)</label>
+              <label>위치 (층/구역)</label>
               <input value={editForm.location} onChange={e => setEditForm({ ...editForm, location: e.target.value })} />
               <label>규격</label>
               <select value={editForm.spec} onChange={e => setEditForm({ ...editForm, spec: e.target.value })}>
@@ -998,11 +945,11 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
                     {t.spec && <span className="pill pill-gray" style={{ marginLeft: 6 }}>{t.spec}</span>}
                     {t.bl && <span className="pill pill-bl" style={{ marginLeft: 4 }}>{t.bl}</span>}
                   </div>
-                  <div className="card-sub">{t.team} · {t.floor ? t.floor + " " : ""}{t.location}</div>
+                  <div className="card-sub">{t.team} · {t.location}</div>
                 </div>
                 <span className="status-tag">
-                  <span className={`dot dot-${t.status === "고장" ? "broken" : t.status === "점검중" ? "check" : !t.todayUse && t.status === "정상" ? "unused" : "ok"}`} />
-                  {t.status === "정상" && !t.todayUse ? "미사용" : t.status}
+                  <span className={`dot dot-${t.status === "정상" ? "ok" : t.status === "고장" ? "broken" : "check"}`} />
+                  {t.status}
                 </span>
               </div>
               <div className="card-meta">반입일: {t.inDate}{t.memo && " · " + t.memo}</div>
@@ -1034,10 +981,9 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
 
 // ── 금일 사용 ─────────────────────────────────────────────────────────────
 function TodayScreen({ tls, currentUser, onToggle, onPurpose, onNotUsed, workLogs, teams }) {
-  const canEdit = ["team", "admin_safety"].includes(currentUser.role);
   const myTls = currentUser.role === "team"
     ? tls.filter(t => t.team === currentUser.team)
-    : ["admin", "admin_construction", "admin_safety"].includes(currentUser.role)
+    : currentUser.role === "admin"
       ? tls.filter(t => { const team = teams?.find(tm => tm.name === t.team); return (t.bl || team?.bl) === currentUser.bl; })
       : tls;
   const useCount = myTls.filter(t => t.todayUse).length;
@@ -1063,7 +1009,7 @@ function TodayScreen({ tls, currentUser, onToggle, onPurpose, onNotUsed, workLog
         return (
           <div key={t.id} className="card">
             <div className="today-row">
-              <button className={`toggle ${t.todayUse ? "on" : ""}`} onClick={() => canEdit && onToggle(t.id, t.todayUse)} style={{ opacity: canEdit ? 1 : 0.5, cursor: canEdit ? "pointer" : "not-allowed" }} />
+              <button className={`toggle ${t.todayUse ? "on" : ""}`} onClick={() => onToggle(t.id, t.todayUse)} />
               <div className="flex1">
                 <div className="tl-sn">{t.sn} {t.spec && <span className="pill pill-gray">{t.spec}</span>}</div>
                 <div className="tl-meta">{t.team} · {t.location}</div>
@@ -1074,17 +1020,14 @@ function TodayScreen({ tls, currentUser, onToggle, onPurpose, onNotUsed, workLog
               <div style={{ marginTop: 8 }}>
                 <div style={{ fontSize: 11, color: "#534AB7", fontWeight: 600, marginBottom: 4 }}>작업 내용</div>
                 <input className="purpose-input" placeholder="작업 내용을 입력해주세요"
-                  defaultValue={t.todayPurpose} readOnly={!canEdit}
-                  style={{ background: canEdit ? "#fff" : "#fafafa" }}
-                  onBlur={e => canEdit && onPurpose(t.id, e.target.value)} />
+                  defaultValue={t.todayPurpose} onBlur={e => onPurpose(t.id, e.target.value)} />
               </div>
             ) : (
               <div style={{ marginTop: 8 }}>
                 <div style={{ fontSize: 11, color: "#aaa", fontWeight: 600, marginBottom: 4 }}>미사용 사유</div>
-                <input className="purpose-input" placeholder={canEdit ? "미사용 사유를 입력해주세요 (선택)" : "미사용"}
+                <input className="purpose-input" placeholder="미사용 사유를 입력해주세요 (선택)"
                   style={{ borderColor: "#f0f0f0", background: "#fafafa" }}
-                  defaultValue={t.notUsedReason || ""} readOnly={!canEdit}
-                  onBlur={e => canEdit && onNotUsed(t.id, e.target.value)} />
+                  defaultValue={t.notUsedReason || ""} onBlur={e => onNotUsed(t.id, e.target.value)} />
               </div>
             )}
             {mins > 0 && (
@@ -1817,17 +1760,15 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
           </div>
         ))}
         <div style={{ borderTop: "1px solid #f0f0f0", marginTop: 8, paddingTop: 8 }}>
-          <div style={{ fontSize: 11, color: "#aaa", marginBottom: 6 }}>관리자 계정 (고정)</div>
-          {accounts.filter(a => ["admin_construction", "admin_safety"].includes(a.role)).map(a => (
+          <div style={{ fontSize: 11, color: "#aaa", marginBottom: 6 }}>관리자 계정</div>
+          {adminAccounts.map(a => (
             <div key={a.id} className="team-row">
-              <div className="team-avatar" style={{ background: a.role === "admin_safety" ? "#E1F5EE" : "#E6F1FB", color: a.role === "admin_safety" ? "#085041" : "#0C447C" }}>
-                {a.role === "admin_safety" ? "🛡" : "🔧"}
+              <div className="team-avatar" style={{ background: "#E1F5EE", color: "#085041" }}>{(a.label||a.id)[0]}</div>
+              <div className="flex1"><div className="tl-sn">{a.label || a.id}</div><div className="tl-meta">{a.bl} · 관리자</div></div>
+              <div className="btn-row">
+                <button className="btn btn-sm" onClick={() => { setPwModal(a); setNewPw(""); }}>비번변경</button>
+                <button className="btn btn-danger btn-sm" onClick={() => { if (window.confirm(`${a.id} 계정을 삭제하시겠습니까?`)) onDeleteAccount(a.id); }}>삭제</button>
               </div>
-              <div className="flex1">
-                <div className="tl-sn">{a.label || a.id}</div>
-                <div className="tl-meta">{a.bl} · {a.role === "admin_safety" ? "안전관리자" : "공사관리자"}</div>
-              </div>
-              <button className="btn btn-sm" onClick={() => { setPwModal(a); setNewPw(""); }}>비번변경</button>
             </div>
           ))}
         </div>
@@ -1835,7 +1776,7 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
 
       <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         <button className="btn btn-primary flex1" onClick={() => { setModal({ type: "add" }); setForm({ name: "", leader: "", pw: "", bl: "1BL" }); setErr(""); }}>+ 팀 추가</button>
-
+        <button className="btn flex1" onClick={() => { setAdminModal(true); setAdminForm({ name: "", pw: "", bl: "1BL" }); setErr(""); }}>+ 관리자 추가</button>
         <button className="btn flex1" onClick={() => { setDriverModal(true); setDriverForm({ name: "", pw: "", bl: "1BL", teamName: "" }); setErr(""); }}>+ 운전원 추가</button>
       </div>
 

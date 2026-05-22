@@ -324,8 +324,3 @@ textarea { resize: none; }
   box-shadow: 0 4px 12px rgba(83,74,183,0.15);
 }
 .metric-click:active { transform: translateY(0); }
-
-/* ── 미사용 상태 ── */
-.dot-unused { background: #bbb; }
-.badge-admin_construction { background: #E6F1FB; color: #0C447C; }
-.badge-admin_safety { background: #E1F5EE; color: #085041; }
