@@ -124,6 +124,7 @@ export default function App() {
   }
 
   function doLogout() {
+    if (!window.confirm("로그아웃 하시겠습니까?")) return;
     setCurrentUser(null);
     localStorage.removeItem("tl_user");
     setActiveTab("");
@@ -357,7 +358,18 @@ export default function App() {
   return (
     <div className="app">
       <header className="header">
-        <span className="header-icon">🏗</span>
+        <span className="header-icon" style={{ display: "inline-flex", alignItems: "center" }}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="1" y="2" width="22" height="3" rx="1" fill="white"/>
+            <line x1="6" y1="5" x2="11" y2="16" stroke="white" strokeWidth="2" strokeLinecap="round"/>
+            <line x1="11" y1="5" x2="6" y2="16" stroke="white" strokeWidth="2" strokeLinecap="round"/>
+            <line x1="13" y1="5" x2="18" y2="16" stroke="white" strokeWidth="2" strokeLinecap="round"/>
+            <line x1="18" y1="5" x2="13" y2="16" stroke="white" strokeWidth="2" strokeLinecap="round"/>
+            <rect x="1" y="16" width="22" height="3" rx="1" fill="white"/>
+            <circle cx="5" cy="21" r="2" fill="white"/>
+            <circle cx="19" cy="21" r="2" fill="white"/>
+          </svg>
+        </span>
         <h1>TL 장비 관리</h1>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           {offline && <span className="offline-badge" title="전파 없음 - 작업 내용은 자동 저장 후 온라인 시 동기화됩니다">📵 오프라인</span>}
@@ -424,9 +436,21 @@ function LoginScreen({ accounts, onLogin }) {
   return (
     <div className="login-wrap">
       <div className="login-logo">
-        <div className="login-icon">🏗</div>
+        <div className="login-icon" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="48" height="48" rx="12" fill="#534AB7"/>
+            <rect x="6" y="10" width="36" height="5" rx="1.5" fill="white"/>
+            <line x1="13" y1="15" x2="21" y2="32" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+            <line x1="21" y1="15" x2="13" y2="32" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+            <line x1="27" y1="15" x2="35" y2="32" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+            <line x1="35" y1="15" x2="27" y2="32" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+            <rect x="6" y="32" width="36" height="5" rx="1.5" fill="white"/>
+            <circle cx="11" cy="40" r="3" fill="white"/>
+            <circle cx="37" cy="40" r="3" fill="white"/>
+          </svg>
+        </div>
         <h2>TL 장비 관리</h2>
-        <p>현장 타워리프트 통합 관리 시스템</p>
+        <p>현장 테이블리프트 통합 관리 시스템</p>
       </div>
 
       {/* Step 1: 그룹 선택 */}
@@ -1456,6 +1480,7 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
       ? currentUser.bl
       : "1BL"
   ); // 1BL | 2BL | 전체
+  const isDesktop = window.innerWidth >= 1024;
 
   useEffect(() => { fetchHistory(); }, []);
 
@@ -1464,6 +1489,59 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
     const snap = await getDocs(query(collection(db, "history"), orderBy("date", "desc")));
     setHistory(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     setLoading(false);
+  }
+
+  async function downloadExcel() {
+    // SheetJS가 로드 안 됐으면 스크립트 로드
+    if (!window.XLSX) {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+    }
+    const XLSX = window.XLSX;
+    const activeBl = currentUser.role === "sojangnm" ? blTab : currentUser.bl;
+
+    const rows = [];
+    filtered.forEach(h => {
+      const data = activeBl === "전체" ? (h.data || []) : (h.data || []).filter(d => d.bl === activeBl);
+      const sorted = [...data].sort((a, b) => {
+        if (a.bl !== b.bl) return (a.bl||"").localeCompare(b.bl||"");
+        return (a.team||"").localeCompare(b.team||"");
+      });
+      sorted.forEach(d => {
+        const avgMin = d.total > 0 ? Math.round((d.totalMin || 0) / d.total) : 0;
+        const avgH = Math.floor(avgMin / 60);
+        const avgM = avgMin % 60;
+        const countRate = d.total > 0 ? Math.round((d.used / d.total) * 100) : 0;
+        rows.push({
+          "날짜": h.date,
+          "공구": d.bl || "",
+          "팀": d.team || "",
+          "전체 TL(대)": d.total || 0,
+          "사용 TL(대)": d.used || 0,
+          "TL당 평균 사용시간": avgMin > 0 ? `${avgH}h ${avgM}m` : "0h",
+          "대수 가동률(%)": countRate,
+          "시간 가동률(%)": d.rateTime || 0,
+        });
+      });
+    });
+
+    if (rows.length === 0) { alert("출력할 데이터가 없습니다."); return; }
+
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const colWidths = [
+      { wch: 12 }, { wch: 6 }, { wch: 16 }, { wch: 12 },
+      { wch: 12 }, { wch: 18 }, { wch: 14 }, { wch: 14 },
+    ];
+    ws["!cols"] = colWidths;
+    const wb = XLSX.utils.book_new();
+    const sheetName = `가동률_${activeBl}_${dateFrom||"전체"}${dateTo ? "~"+dateTo : ""}`;
+    XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0, 31));
+    XLSX.writeFile(wb, `TL가동률_${new Date().toISOString().slice(0,10)}.xlsx`);
   }
 
   async function saveToday() {
@@ -1514,6 +1592,11 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
       <button className="btn btn-primary full mb12" onClick={saveToday} disabled={saving}>
         {saving ? "저장 중..." : "📋 오늘 현황 기록 저장"}
       </button>
+      {isDesktop && (
+        <button className="btn full mb12" style={{ background: "#1D9E75", color: "#fff" }} onClick={downloadExcel}>
+          📥 엑셀 다운로드
+        </button>
+      )}
 
       {/* 공구 탭 - 소장만 전체/1BL/2BL 선택 가능, 관리자는 자기 BL만 */}
       {currentUser.role === "sojangnm" ? (
