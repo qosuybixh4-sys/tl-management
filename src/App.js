@@ -1492,7 +1492,6 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
   }
 
   async function downloadExcel() {
-    // SheetJS가 로드 안 됐으면 스크립트 로드
     if (!window.XLSX) {
       await new Promise((resolve, reject) => {
         const s = document.createElement("script");
@@ -1505,39 +1504,88 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
     const XLSX = window.XLSX;
     const activeBl = currentUser.role === "sojangnm" ? blTab : currentUser.bl;
 
-    const rows = [];
+    // 팀 목록 수집 (공구별 가나다순)
+    const teamSet = new Map();
     filtered.forEach(h => {
       const data = activeBl === "전체" ? (h.data || []) : (h.data || []).filter(d => d.bl === activeBl);
-      const sorted = [...data].sort((a, b) => {
-        if (a.bl !== b.bl) return (a.bl||"").localeCompare(b.bl||"");
-        return (a.team||"").localeCompare(b.team||"");
-      });
-      sorted.forEach(d => {
-        const avgMin = d.total > 0 ? Math.round((d.totalMin || 0) / d.total) : 0;
-        const avgH = Math.floor(avgMin / 60);
-        const avgM = avgMin % 60;
-        const countRate = d.total > 0 ? Math.round((d.used / d.total) * 100) : 0;
-        rows.push({
-          "날짜": h.date,
-          "공구": d.bl || "",
-          "팀": d.team || "",
-          "전체 TL(대)": d.total || 0,
-          "사용 TL(대)": d.used || 0,
-          "TL당 평균 사용시간": avgMin > 0 ? `${avgH}h ${avgM}m` : "0h",
-          "대수 가동률(%)": countRate,
-          "시간 가동률(%)": d.rateTime || 0,
-        });
+      data.forEach(d => {
+        if (!teamSet.has(d.team)) teamSet.set(d.team, d.bl || "");
       });
     });
+    // 공구별 가나다순 정렬
+    const teamList = [...teamSet.entries()].sort((a, b) => {
+      if (a[1] !== b[1]) return (a[1]||"").localeCompare(b[1]||"");
+      return a[0].localeCompare(b[0]);
+    });
 
-    if (rows.length === 0) { alert("출력할 데이터가 없습니다."); return; }
+    if (teamList.length === 0) { alert("출력할 데이터가 없습니다."); return; }
+
+    // 날짜 목록 (오름차순)
+    const dates = [...new Set(filtered.map(h => h.date))].sort();
+
+    // 행 생성: 팀별로 날짜 순서대로
+    const rows = [];
+    const teamBoundaries = []; // 팀별 시작/끝 행 인덱스 (헤더 행 제외, 0-based)
+
+    teamList.forEach(([team, bl]) => {
+      const startRow = rows.length;
+      dates.forEach(date => {
+        const h = filtered.find(hh => hh.date === date);
+        const d = (h?.data || []).find(dd => dd.team === team);
+        const total = d?.total || 0;
+        const used = d?.used || 0;
+        const totalMin = d?.totalMin || 0;
+        const avgMin = total > 0 ? Math.round(totalMin / total) : 0;
+        const avgH = Math.floor(avgMin / 60);
+        const avgM = avgMin % 60;
+        const countRate = total > 0 ? Math.round((used / total) * 100) : 0;
+        rows.push({
+          "날짜": date,
+          "공구": bl,
+          "팀": team,
+          "전체 TL(대)": total,
+          "사용 TL(대)": used,
+          "대수 가동률(%)": countRate,
+          "TL당 평균 사용시간": avgMin > 0 ? `${avgH}h ${avgM > 0 ? avgM+"m" : ""}`.trim() : "0h",
+          "시간 가동률(%)": d?.rateTime || 0,
+        });
+      });
+      teamBoundaries.push({ team, startRow, endRow: rows.length - 1 });
+    });
 
     const ws = XLSX.utils.json_to_sheet(rows);
-    const colWidths = [
-      { wch: 12 }, { wch: 6 }, { wch: 16 }, { wch: 12 },
-      { wch: 12 }, { wch: 18 }, { wch: 14 }, { wch: 14 },
+    ws["!cols"] = [
+      { wch: 13 }, { wch: 6 }, { wch: 16 }, { wch: 12 },
+      { wch: 12 }, { wch: 14 }, { wch: 18 }, { wch: 14 },
     ];
-    ws["!cols"] = colWidths;
+
+    // 팀별 굵은 테두리 적용
+    const borderThin = { style: "thin", color: { rgb: "CCCCCC" } };
+    const borderThick = { style: "medium", color: { rgb: "222222" } };
+    const cols = ["A","B","C","D","E","F","G","H"];
+
+    teamBoundaries.forEach(({ startRow, endRow }) => {
+      for (let r = startRow; r <= endRow; r++) {
+        const xlRow = r + 2; // 헤더 1행 + 1-based
+        cols.forEach((col, ci) => {
+          const cellRef = `${col}${xlRow}`;
+          if (!ws[cellRef]) ws[cellRef] = { t: "s", v: "" };
+          const isTop = r === startRow;
+          const isBot = r === endRow;
+          const isLeft = ci === 0;
+          const isRight = ci === cols.length - 1;
+          ws[cellRef].s = {
+            border: {
+              top: isTop ? borderThick : borderThin,
+              bottom: isBot ? borderThick : borderThin,
+              left: isLeft ? borderThick : borderThin,
+              right: isRight ? borderThick : borderThin,
+            }
+          };
+        });
+      }
+    });
+
     const wb = XLSX.utils.book_new();
     const sheetName = `가동률_${activeBl}_${dateFrom||"전체"}${dateTo ? "~"+dateTo : ""}`;
     XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0, 31));
