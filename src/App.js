@@ -647,17 +647,16 @@ function OverviewScreen({ tls, teams, approvals, currentUser }) {
         <div className="section-title">상태별 장비</div>
         <div className="card mb12">
           {[
-            { label: "정상", color: "#1D9E75", count: ftls.filter(t => t.status === "정상").length, type: "정상" },
-            { label: "점검", color: "#EF9F27", count: inCheck, type: "점검" },
-            { label: "고장", color: "#E24B4A", count: broken, type: "고장" },
-            { label: "미사용", color: "#aaa", count: notUsed, type: "미사용" },
+            { label: "정상(사용중)", color: "#1D9E75", count: ftls.filter(t => t.status === "정상" && t.todayUse).length, type: "금일사용", dotClass: "ok" },
+            { label: "점검", color: "#EF9F27", count: inCheck, type: "점검", dotClass: "check" },
+            { label: "고장", color: "#E24B4A", count: broken, type: "고장", dotClass: "broken" },
+            { label: "미사용", color: "#aaa", count: ftls.filter(t => t.status === "정상" && !t.todayUse).length, type: "미사용", dotClass: "unused" },
           ].map((item, i, arr) => (
             <div key={item.label}
               className="metric-click"
               style={{ display: "flex", alignItems: "center", padding: "10px 4px", borderBottom: i < arr.length - 1 ? "1px solid #f0f0f0" : "none", cursor: "pointer" }}
               onClick={() => setPopup({ type: item.type, bl })}>
-              <span className={`dot dot-${item.label === "정상" ? "ok" : item.label === "고장" ? "broken" : item.label === "점검" ? "check" : ""}`}
-                style={item.label === "미사용" ? { background: "#ccc" } : {}} />
+              <span className={`dot dot-${item.dotClass}`} />
               <span style={{ fontSize: 14, fontWeight: 500, marginLeft: 8, flex: 1 }}>{item.label}</span>
               <span className="pill">{item.count}대</span>
             </div>
@@ -889,8 +888,18 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
   }
 
   async function handleEditSave(id) {
-    if (!editForm.sn) { alert("일련번호를 입력해주세요."); return; }
-    await onUpdate(id, editForm);
+    if (isTeam) {
+      // 팀장은 층수/위치/상태/메모만 수정 가능
+      await onUpdate(id, {
+        floor: editForm.floor || "",
+        location: editForm.location || "",
+        status: editForm.status || "정상",
+        memo: editForm.memo || "",
+      });
+    } else {
+      if (!editForm.sn) { alert("일련번호를 입력해주세요."); return; }
+      await onUpdate(id, editForm);
+    }
     setEditingId(null);
   }
 
@@ -1060,9 +1069,29 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
               )}
               {isTeam && (
                 <div style={{ marginTop: 8 }}>
-                  <input style={{ margin: 0, fontSize: 12 }} defaultValue={t.location}
-                    placeholder="위치 수정 (예: B1F 동측)"
-                    onBlur={e => { if (e.target.value !== t.location) onUpdate(t.id, { location: e.target.value }); }} />
+                  {editingId === t.id ? (
+                    <div>
+                      <label>층수</label>
+                      <select value={editForm.floor || ""} onChange={e => setEditForm({ ...editForm, floor: e.target.value })}>
+                        <option value="">선택해주세요</option>
+                        {TL_FLOORS.map(f => <option key={f}>{f}</option>)}
+                      </select>
+                      <label>위치 (세부 구역)</label>
+                      <input value={editForm.location || ""} onChange={e => setEditForm({ ...editForm, location: e.target.value })} placeholder="예: B1F 동측" />
+                      <label>상태</label>
+                      <select value={editForm.status || "정상"} onChange={e => setEditForm({ ...editForm, status: e.target.value })}>
+                        <option>정상</option><option>점검중</option><option>고장</option>
+                      </select>
+                      <label>메모</label>
+                      <input value={editForm.memo || ""} onChange={e => setEditForm({ ...editForm, memo: e.target.value })} placeholder="비고" />
+                      <div className="btn-row">
+                        <button className="btn btn-primary btn-sm" onClick={() => handleEditSave(t.id)}>저장</button>
+                        <button className="btn btn-sm" onClick={() => setEditingId(null)}>취소</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button className="btn btn-sm" onClick={() => startEdit(t)}>✏ 수정</button>
+                  )}
                 </div>
               )}
             </div>
