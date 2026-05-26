@@ -54,7 +54,7 @@ const NAV_TABS = {
     { id: "rental", icon: "🔄", label: "대여" },
     { id: "request", icon: "📨", label: "승인요청" },
   ],
-  driver: [
+  guide: [
     { id: "driver", icon: "⏱", label: "작업기록" },
   ],
 };
@@ -222,7 +222,7 @@ export default function App() {
   async function addDriver(name, pw, bl, teamName) {
     if (!name || !pw) return "이름과 비밀번호를 입력해주세요.";
     if (accounts.find(a => a.id === name)) return "이미 존재하는 이름입니다.";
-    await setDoc(doc(db, "accounts", name), { pw, role: "driver", label: name, bl, teamName });
+    await setDoc(doc(db, "accounts", name), { pw, role: "guide", label: name, bl, teamName });
     return null;
   }
   async function deleteAccount(id) { await deleteDoc(doc(db, "accounts", id)); }
@@ -353,7 +353,7 @@ export default function App() {
   if (loading) return <div className="splash"><div className="spinner" /><p>불러오는 중...</p></div>;
   if (!currentUser) return <LoginScreen accounts={accounts} onLogin={doLogin} />;
 
-  const navTabs = NAV_TABS[currentUser.role] || [];
+  const navTabs = NAV_TABS[currentUser.role] || NAV_TABS['guide'] || [];
 
   return (
     <div className="app">
@@ -395,7 +395,7 @@ export default function App() {
         {activeTab === "request" && <RequestScreen tls={tls} teams={teams} currentUser={currentUser} onSubmit={submitApproval} approvals={approvals} />}
         {activeTab === "teams" && <TeamsScreen teams={teams} tls={tls} accounts={accounts} onAdd={addTeam} onEdit={editTeam} onDelete={deleteTeam} onChangePw={changePassword} onAddDriver={addDriver} onDeleteAccount={deleteAccount} />}
         {activeTab === "history" && <HistoryScreen tls={tls} teams={teams} workLogs={workLogs} currentUser={currentUser} />}
-        {activeTab === "driver" && <DriverScreen currentUser={currentUser} tls={tls} workLogs={workLogs} onStart={startWork} onEnd={endWork} />}
+        {activeTab === "driver" && <GuideScreen currentUser={currentUser} tls={tls} workLogs={workLogs} onStart={startWork} onEnd={endWork} />}
       </main>
     </div>
   );
@@ -428,7 +428,7 @@ function LoginScreen({ accounts, onLogin }) {
     if (role === "admin_construction") return "공사관리자";
     if (role === "admin_safety") return "안전관리자";
     if (role === "team") return "팀장";
-    if (role === "driver") return "TL 운전원";
+    if (role === "guide") return "TL 유도원";
     if (role === "sojangnm") return "소장";
     return role;
   };
@@ -481,7 +481,7 @@ function LoginScreen({ accounts, onLogin }) {
           {groupAccounts.length === 0 && <div className="empty" style={{ padding: "16px 0" }}>등록된 계정이 없습니다.</div>}
           {groupAccounts.map(a => (
             <button key={a.id} className="group-btn" onClick={() => { setRoleId(a.id); setStep("login"); setErr(""); }}>
-              {roleLabel(a.role) === "TL 운전원" ? "🚧" : roleLabel(a.role) === "관리자" ? "🔧" : "👷"} {a.label || a.id} <span style={{ fontSize: 11, color: "#aaa", marginLeft: 4 }}>({roleLabel(a.role)})</span>
+              {roleLabel(a.role) === "TL 유도원" ? "🦺" : roleLabel(a.role) === "관리자" || roleLabel(a.role) === "공사관리자" || roleLabel(a.role) === "안전관리자" ? "🔧" : "👷"} {a.label || a.id} <span style={{ fontSize: 11, color: "#aaa", marginLeft: 4 }}>({roleLabel(a.role)})</span>
             </button>
           ))}
           <button className="btn full mt8" onClick={() => { setStep("group"); setGroup(""); }}>← 뒤로</button>
@@ -1735,55 +1735,51 @@ function HistoryScreen({ tls, teams, workLogs, currentUser }) {
   );
 }
 
-// ── 운전원 작업 기록 ──────────────────────────────────────────────────────
-function DriverScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
-  const myTeamTls = tls.filter(t => t.team === currentUser.teamName);
+// ── 유도원 작업 기록 (QR 스캔, 최대 2대 동시) ───────────────────────────
+function GuideScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
   const todayStr = new Date().toISOString().slice(0, 10);
+  const MAX_SLOTS = 2;
 
-  // ── 핵심: 작업 시작 시각을 localStorage에 저장 ──
-  // Firebase startedAt은 오프라인 시 null/pending이므로 믿지 않음
-  // 로컬 스토리지의 시각을 단일 진실 공급원(source of truth)으로 사용
-  const LOCAL_KEY = `work_start_${currentUser.id}`;
-  const LOCAL_LOG_KEY = `work_logid_${currentUser.id}`;
+  // localStorage 키 (슬롯별)
+  const slotKey  = (i) => `guide_start_${currentUser.id}_${i}`;
+  const logKey   = (i) => `guide_logid_${currentUser.id}_${i}`;
+  const snKey    = (i) => `guide_tlsn_${currentUser.id}_${i}`;
+  const tlIdKey  = (i) => `guide_tlid_${currentUser.id}_${i}`;
 
-  const [isWorking, setIsWorking] = useState(() => {
-    // 앱 재시작 시 로컬 스토리지에서 진행 중 작업 복원
-    return !!localStorage.getItem(LOCAL_KEY);
-  });
-  const [workStartTime, setWorkStartTime] = useState(() => {
-    const saved = localStorage.getItem(LOCAL_KEY);
-    return saved ? new Date(saved) : null;
-  });
-  const [activeLogId, setActiveLogId] = useState(() => {
-    return localStorage.getItem(LOCAL_LOG_KEY) || null;
-  });
-  const [elapsed, setElapsed] = useState(0);
+  // 슬롯 상태 (2개)
+  const [slots, setSlots] = useState(() =>
+    Array.from({ length: MAX_SLOTS }, (_, i) => ({
+      active: !!localStorage.getItem(slotKey(i)),
+      startTime: localStorage.getItem(slotKey(i)) ? new Date(localStorage.getItem(slotKey(i))) : null,
+      logId: localStorage.getItem(logKey(i)) || null,
+      tlSn: localStorage.getItem(snKey(i)) || "",
+      tlId: localStorage.getItem(tlIdKey(i)) || null,
+    }))
+  );
+  const [elapsed, setElapsed] = useState([0, 0]);
   const timerRef = useRef(null);
+
+  // QR 스캔 상태
+  const [scanSlot, setScanSlot] = useState(null); // null | 0 | 1
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState("");
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const animRef = useRef(null);
+
+  // 날짜 조회
   const [viewDate, setViewDate] = useState(todayStr);
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const [activeTlSn, setActiveTlSn] = useState(() => {
-    return localStorage.getItem(`work_tlsn_${currentUser.id}`) || "";
-  });
 
-  // 날짜 파싱 헬퍼
-  function parseTime(val) {
-    if (!val) return null;
-    if (val instanceof Date) return val;
-    if (typeof val === 'string') return new Date(val);
-    if (val?.toDate) return val.toDate();
-    return null;
-  }
-
-  function fmtTime(val) {
-    const d = parseTime(val);
-    return d && !isNaN(d) ? d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "-";
-  }
-
-  function fmtDate(dateStr) {
-    if (!dateStr) return "";
-    const d = new Date(dateStr + "T00:00:00");
-    return d.toLocaleDateString("ko-KR", { month: "long", day: "numeric", weekday: "short" });
-  }
+  // 타이머
+  useEffect(() => {
+    timerRef.current = setInterval(() => {
+      setElapsed(slots.map(s =>
+        s.active && s.startTime ? Math.max(0, Math.floor((new Date() - s.startTime) / 1000)) : 0
+      ));
+    }, 1000);
+    return () => clearInterval(timerRef.current);
+  }, [slots]);
 
   function fmt(sec) {
     const h = Math.floor(sec / 3600);
@@ -1791,130 +1787,203 @@ function DriverScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
     const s = sec % 60;
     return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   }
+  function fmtTime(val) {
+    if (!val) return "-";
+    const d = typeof val === "string" ? new Date(val) : val?.toDate?.() || new Date(val);
+    return isNaN(d) ? "-" : d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+  }
+  function fmtDate(dateStr) {
+    if (!dateStr) return "";
+    return new Date(dateStr + "T00:00:00").toLocaleDateString("ko-KR", { month: "long", day: "numeric", weekday: "short" });
+  }
 
-  // ── 타이머: workStartTime 기준 (로컬 시각) ──
-  useEffect(() => {
-    if (isWorking && workStartTime) {
-      timerRef.current = setInterval(() => {
-        const diff = Math.floor((new Date() - workStartTime) / 1000);
-        setElapsed(diff > 0 ? diff : 0);
-      }, 1000);
-    } else {
-      clearInterval(timerRef.current);
-      setElapsed(0);
+  // QR 카메라 시작
+  async function startScan(slotIdx) {
+    setScanSlot(slotIdx);
+    setScanning(true);
+    setScanError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      streamRef.current = stream;
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play();
+          scanFrame(slotIdx);
+        }
+      }, 200);
+    } catch(e) {
+      setScanError("카메라 접근 권한이 필요합니다.");
+      setScanning(false);
     }
-    return () => clearInterval(timerRef.current);
-  }, [isWorking, workStartTime]);
+  }
 
-  // ── 작업 시작 ──
-  async function handleStart(tl) {
-    if (!window.confirm(`${tl.sn} 작업을 시작하시겠습니까?`)) return;
+  // QR 프레임 분석
+  function scanFrame(slotIdx) {
+    if (!videoRef.current) return;
+    const video = videoRef.current;
+    if (video.readyState !== video.HAVE_ENOUGH_DATA) {
+      animRef.current = requestAnimationFrame(() => scanFrame(slotIdx));
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    // jsQR 동적 로드
+    if (!window.jsQR) {
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+      s.onload = () => scanFrame(slotIdx);
+      document.head.appendChild(s);
+      return;
+    }
+    const code = window.jsQR(imageData.data, imageData.width, imageData.height);
+    if (code) {
+      handleQRResult(code.data, slotIdx);
+    } else {
+      animRef.current = requestAnimationFrame(() => scanFrame(slotIdx));
+    }
+  }
+
+  function stopScan() {
+    if (animRef.current) cancelAnimationFrame(animRef.current);
+    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+    setScanning(false);
+    setScanSlot(null);
+  }
+
+  // QR 인식 결과 처리
+  async function handleQRResult(data, slotIdx) {
+    stopScan();
+    // QR 형식: "TL:G06093"
+    if (!data.startsWith("TL:")) {
+      alert("유효하지 않은 QR코드입니다.\n테이블리프트 QR코드를 스캔해 주세요.");
+      return;
+    }
+    const sn = data.replace("TL:", "").trim();
+    // 일련번호로 TL 찾기 (공구 내 전체)
+    const tl = tls.find(t => t.sn.replace(/\s/g,"").toUpperCase() === sn.replace(/\s/g,"").toUpperCase()
+                           && (t.bl || "") === (currentUser.bl || ""));
+    if (!tl) {
+      alert(`TL을 찾을 수 없습니다: ${sn}\n소속 공구(${currentUser.bl})의 TL인지 확인해 주세요.`);
+      return;
+    }
+    // 이미 같은 TL 작업 중인지 확인
+    const already = slots.some(s => s.active && s.tlId === tl.id);
+    if (already) { alert(`${sn}은 이미 작업 중입니다.`); return; }
+
+    if (!window.confirm(`${sn} 작업을 시작하시겠습니까?\n위치: ${tl.floor ? tl.floor + " " : ""}${tl.location}`)) return;
+
     const now = new Date();
     const nowISO = now.toISOString();
-    // 1. 로컬 즉시 반영
-    setIsWorking(true);
-    setWorkStartTime(now);
-    setActiveTlSn(tl.sn);
-    localStorage.setItem(LOCAL_KEY, nowISO);
-    localStorage.setItem(`work_tlsn_${currentUser.id}`, tl.sn);
-    // 2. Firebase 저장 (백그라운드, 오프라인이면 나중에 동기화)
     const logId = await onStart(currentUser, tl.id, nowISO);
-    if (logId) {
-      setActiveLogId(logId);
-      localStorage.setItem(LOCAL_LOG_KEY, logId);
-    }
+
+    localStorage.setItem(slotKey(slotIdx), nowISO);
+    localStorage.setItem(snKey(slotIdx), sn);
+    localStorage.setItem(tlIdKey(slotIdx), tl.id);
+    if (logId) localStorage.setItem(logKey(slotIdx), logId);
+
+    setSlots(prev => prev.map((s, i) => i === slotIdx
+      ? { active: true, startTime: now, logId: logId || null, tlSn: sn, tlId: tl.id }
+      : s
+    ));
   }
 
-  // ── 작업 종료 ──
-  async function handleEnd() {
-    if (!isWorking || !workStartTime) return;
-    if (!window.confirm("작업을 종료하시겠습니까?")) return;
+  // 작업 종료
+  async function handleEnd(slotIdx) {
+    const slot = slots[slotIdx];
+    if (!slot.active || !slot.startTime) return;
+    if (!window.confirm(`${slot.tlSn} 작업을 종료하시겠습니까?`)) return;
+
     const now = new Date();
-    const durationMin = Math.round((now - workStartTime) / 60000);
-    // 1. 로컬 즉시 반영 (타이머 정지)
-    clearInterval(timerRef.current);
-    setIsWorking(false);
-    setWorkStartTime(null);
-    setElapsed(0);
-    localStorage.removeItem(LOCAL_KEY);
-    localStorage.removeItem(LOCAL_LOG_KEY);
-    localStorage.removeItem(`work_tlsn_${currentUser.id}`);
-    // 2. Firebase 저장 (logId 또는 Firebase에서 찾아서 저장)
-    const logId = activeLogId || workLogs.find(
-      l => l.driverId === currentUser.id && l.endedAt === null
-    )?.id;
-    setActiveLogId(null);
-    if (logId) {
-      await onEnd(logId, workStartTime.toISOString(), durationMin);
-    }
+    const durationMin = Math.round((now - slot.startTime) / 60000);
+    const logId = slot.logId || workLogs.find(l => l.driverId === currentUser.id && l.tlId === slot.tlId && l.endedAt === null)?.id;
+
+    localStorage.removeItem(slotKey(slotIdx));
+    localStorage.removeItem(logKey(slotIdx));
+    localStorage.removeItem(snKey(slotIdx));
+    localStorage.removeItem(tlIdKey(slotIdx));
+
+    setSlots(prev => prev.map((s, i) => i === slotIdx
+      ? { active: false, startTime: null, logId: null, tlSn: "", tlId: null }
+      : s
+    ));
+    if (logId) await onEnd(logId, slot.startTime.toISOString(), durationMin);
   }
 
-  // ── Firebase 로그와 로컬 상태 동기화 ──
-  // 온라인 복귀 후 Firebase에 종료 기록이 있으면 로컬 상태도 정리
-  useEffect(() => {
-    if (!isWorking) return;
-    const fbLog = workLogs.find(l => l.driverId === currentUser.id && l.endedAt !== null && l.id === activeLogId);
-    if (fbLog) {
-      // Firebase에 이미 종료됨 → 로컬 상태 정리
-      setIsWorking(false);
-      setWorkStartTime(null);
-      localStorage.removeItem(LOCAL_KEY);
-      localStorage.removeItem(LOCAL_LOG_KEY);
-      localStorage.removeItem(`work_tlsn_${currentUser.id}`);
-    }
-  }, [workLogs]);
-
-  // 오늘 완료된 로그 (durationMin 있는 것)
+  const activeCount = slots.filter(s => s.active).length;
   const myTodayLogs = workLogs.filter(l => l.driverId === currentUser.id && l.date === todayStr && l.durationMin != null);
   const myViewLogs = workLogs.filter(l => l.driverId === currentUser.id && l.date === viewDate);
   const todayMin = myTodayLogs.reduce((s, l) => s + (l.durationMin || 0), 0);
   const todayRate = Math.min(Math.round((todayMin / (WORK_HOURS * 60)) * 100), 100);
-  const allDates = [...new Set(workLogs.filter(l => l.driverId === currentUser.id).map(l => l.date))].sort((a, b) => b.localeCompare(a));
+  const allDates = [...new Set(workLogs.filter(l => l.driverId === currentUser.id).map(l => l.date))].sort((a,b) => b.localeCompare(a));
 
   return (
     <div>
-      {/* 작업 시작/종료 카드 */}
-      <div className="card" style={{ textAlign: "center", padding: "24px 16px", marginBottom: 16 }}>
-        <div style={{ fontSize: 13, color: "#999", marginBottom: 4 }}>{currentUser.label}</div>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16 }}>
-          {currentUser.teamName ? `${currentUser.bl} · ${currentUser.teamName}` : "팀 미배정"}
-          {myTeamTls.length > 0 && <span style={{ fontSize: 12, color: "#aaa", marginLeft: 6 }}>TL {myTeamTls.length}대</span>}
-        </div>
-
-        {isWorking ? (
-          <>
-            <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>작업 진행 중 — {activeTlSn}</div>
-            <div style={{ fontSize: 48, fontWeight: 700, color: "#534AB7", letterSpacing: 2, marginBottom: 20 }}>
-              {fmt(elapsed)}
+      {/* QR 스캔 모달 */}
+      {scanning && (
+        <div className="modal-bg">
+          <div className="modal" style={{ padding: 0, overflow: "hidden", maxWidth: 360 }}>
+            <div style={{ padding: "14px 16px", fontWeight: 600, fontSize: 15, borderBottom: "1px solid #f0f0f0" }}>
+              📷 QR코드 스캔
             </div>
-            <button className="btn btn-danger" style={{ width: "100%", padding: "14px", fontSize: 16 }}
-              onClick={handleEnd}>
-              ⏹ 작업 종료
-            </button>
-          </>
-        ) : (
-          <>
-            <div style={{ fontSize: 13, color: "#aaa", marginBottom: 12 }}>작업할 TL을 선택하세요</div>
-            {myTeamTls.length === 0 && <div style={{ fontSize: 13, color: "#E24B4A", marginBottom: 16 }}>배정된 TL이 없습니다.</div>}
-            {myTeamTls.map(tl => (
-              <button key={tl.id} className="group-btn" style={{ marginBottom: 8, padding: "12px 14px" }}
-                onClick={() => handleStart(tl)}>
-                🏗 {tl.sn} <span style={{ fontSize: 12, color: "#aaa", marginLeft: 6 }}>{tl.location}</span>
-              </button>
-            ))}
-          </>
-        )}
+            <video ref={videoRef} style={{ width: "100%", display: "block" }} playsInline muted />
+            {scanError && <div className="alert alert-warn" style={{ margin: 12 }}>{scanError}</div>}
+            <div style={{ padding: 12 }}>
+              <button className="btn full" onClick={stopScan}>취소</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 유도원 정보 */}
+      <div className="card" style={{ marginBottom: 12, padding: "14px 16px" }}>
+        <div style={{ fontSize: 13, color: "#999" }}>{currentUser.label}</div>
+        <div style={{ fontSize: 14, fontWeight: 600 }}>
+          {currentUser.bl} · {currentUser.teamName || "팀 미배정"}
+        </div>
+        <div style={{ fontSize: 12, color: activeCount >= MAX_SLOTS ? "#E24B4A" : "#1D9E75", marginTop: 4 }}>
+          {activeCount >= MAX_SLOTS ? "⚠ 최대 2대 작업 중 (추가 불가)" : `작업 슬롯 ${activeCount}/${MAX_SLOTS} 사용 중`}
+        </div>
       </div>
 
+      {/* 슬롯 1, 2 */}
+      {slots.map((slot, i) => (
+        <div key={i} className="card" style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: "#aaa", marginBottom: 8 }}>슬롯 {i + 1}</div>
+          {slot.active ? (
+            <>
+              <div style={{ fontSize: 13, color: "#534AB7", fontWeight: 600, marginBottom: 4 }}>작업 중 — {slot.tlSn}</div>
+              <div style={{ fontSize: 40, fontWeight: 700, color: "#534AB7", letterSpacing: 2, marginBottom: 12, textAlign: "center" }}>
+                {fmt(elapsed[i])}
+              </div>
+              <button className="btn btn-danger full" onClick={() => handleEnd(i)}>⏹ {slot.tlSn} 작업 종료</button>
+            </>
+          ) : (
+            <button
+              className="btn btn-primary full"
+              disabled={activeCount >= MAX_SLOTS}
+              onClick={() => startScan(i)}
+              style={{ opacity: activeCount >= MAX_SLOTS ? 0.5 : 1 }}>
+              📷 QR 스캔으로 작업 시작
+            </button>
+          )}
+        </div>
+      ))}
+
       {/* 오늘 누적 */}
-      <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card" style={{ marginBottom: 12 }}>
         <div className="card-title mb8">오늘 작업 현황 <span style={{ fontSize: 12, color: "#aaa", fontWeight: 400 }}>({fmtDate(todayStr)})</span></div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 8 }}>
           <span>총 {Math.floor(todayMin / 60)}시간 {todayMin % 60}분 / 기준 {WORK_HOURS}시간</span>
           <span style={{ fontWeight: 600, color: todayRate >= 50 ? "#1D9E75" : "#BA7517" }}>{todayRate}%</span>
         </div>
         <div className="rate-bar-bg" style={{ height: 10 }}>
-          <div className="rate-bar-fill" style={{ width: `${Math.min(todayRate, 100)}%`, background: todayRate >= 50 ? "#1D9E75" : "#EF9F27" }} />
+          <div className="rate-bar-fill" style={{ width: `${todayRate}%`, background: todayRate >= 50 ? "#1D9E75" : "#EF9F27" }} />
         </div>
       </div>
 
@@ -1927,7 +1996,6 @@ function DriverScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
           {showDatePicker ? "닫기" : "날짜 조회"}
         </button>
       </div>
-
       {showDatePicker && (
         <div className="card mb12">
           <div style={{ fontSize: 12, color: "#999", marginBottom: 8 }}>조회할 날짜 선택</div>
@@ -1941,7 +2009,6 @@ function DriverScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
           ))}
         </div>
       )}
-
       {myViewLogs.length === 0 && <div className="empty">해당 날짜의 작업 기록이 없습니다.</div>}
       {myViewLogs.map((l, i) => (
         <div key={l.id} className="card">
@@ -1975,7 +2042,7 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
 
   const systemAccounts = accounts.filter(a => a.role === "sojangnm");
   const adminAccounts = accounts.filter(a => a.role === "admin");
-  const driverAccounts = accounts.filter(a => a.role === "driver");
+  const driverAccounts = accounts.filter(a => a.role === "guide" || a.role === "driver");
 
   async function handleAdd() {
     const error = await onAdd(form.name, form.leader, form.pw, form.bl);
@@ -2048,7 +2115,7 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
       <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
         <button className="btn btn-primary flex1" onClick={() => { setModal({ type: "add" }); setForm({ name: "", leader: "", pw: "", bl: "1BL" }); setErr(""); }}>+ 팀 추가</button>
 
-        <button className="btn flex1" onClick={() => { setDriverModal(true); setDriverForm({ name: "", pw: "", bl: "1BL", teamName: "" }); setErr(""); }}>+ 운전원 추가</button>
+        <button className="btn flex1" onClick={() => { setDriverModal(true); setDriverForm({ name: "", pw: "", bl: "1BL", teamName: "" }); setErr(""); }}>+ 유도원 추가</button>
       </div>
 
       {BLS.map(bl => (
@@ -2077,9 +2144,9 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
       ))}
 
       {/* 운전원 목록 */}
-      <div className="section-title">TL 운전원</div>
+      <div className="section-title">TL 유도원</div>
       <div className="card mb12">
-        {driverAccounts.length === 0 && <div className="empty-sm">등록된 운전원 없음</div>}
+        {driverAccounts.length === 0 && <div className="empty-sm">등록된 유도원 없음</div>}
         {driverAccounts.map((a, i) => {
           return (
             <div key={a.id} className={`team-row${i < driverAccounts.length - 1 ? " border-b" : ""}`}>
@@ -2126,13 +2193,13 @@ function TeamsScreen({ teams, tls, accounts, onAdd, onEdit, onDelete, onChangePw
       {driverModal && (
         <div className="modal-bg" onClick={() => setDriverModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">🚧 TL 운전원 추가</div>
+            <div className="modal-title">🦺 TL 유도원 추가</div>
             {err && <div className="alert alert-warn mb8">{err}</div>}
             <label>소속 공구</label>
             <select value={driverForm.bl} onChange={e => setDriverForm({ ...driverForm, bl: e.target.value })}>
               <option>1BL</option><option>2BL</option>
             </select>
-            <label>운전원 이름 (계정 ID)</label>
+            <label>유도원 이름 (계정 ID)</label>
             <input value={driverForm.name} onChange={e => setDriverForm({ ...driverForm, name: e.target.value })} placeholder="예: 홍길동" />
             <label>비밀번호</label>
             <input type="password" value={driverForm.pw} onChange={e => setDriverForm({ ...driverForm, pw: e.target.value })} placeholder="비밀번호 입력" />
