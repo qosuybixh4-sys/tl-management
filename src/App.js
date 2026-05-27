@@ -184,6 +184,9 @@ export default function App() {
   async function submitApproval(data) {
     await addDoc(collection(db, "approvals"), { ...data, status: "대기", createdAt: serverTimestamp() });
   }
+  async function cancelApproval(id) {
+    await deleteDoc(doc(db, "approvals", id));
+  }
   async function decideApproval(id, status, approval) {
     await updateDoc(doc(db, "approvals", id), { status });
     if (status === "승인" && approval.type === "이관") {
@@ -258,36 +261,36 @@ export default function App() {
   }
 
   // 대여 함수
-  async function createRental(fromTeam, toTeam, tlId, tlSn, bl) {
+  async function createRental(fromTeam, toTeam, tlId, tlSn, bl, returnDate) {
     const today = new Date().toISOString().slice(0, 10);
-    // 이미 오늘 같은 TL 대여 있으면 차단
-    const existing = rentals.find(r => r.tlId === tlId && r.date === today && r.status === "대여중");
+    const existing = rentals.find(r => r.tlId === tlId && r.status === "대여중");
     if (existing) { alert("이미 대여 중인 TL입니다."); return; }
     await addDoc(collection(db, "rentals"), {
       fromTeam, toTeam, tlId, tlSn, bl,
       date: today,
+      returnDate: returnDate || today,
       status: "대여중",
       createdAt: serverTimestamp(),
     });
-    // TL 팀을 임시 변경 (대여팀으로)
+    // 소속 유지, 대여중 표시만 추가
     await updateDoc(doc(db, "tls", tlId), {
-      team: toTeam,
-      rentedFrom: fromTeam,
       isRented: true,
+      rentedTo: toTeam,
+      rentReturnDate: returnDate || today,
     });
   }
 
-  async function returnRental(rentalId, tlId, fromTeam) {
+  async function returnRental(rentalId, tlId) {
     await updateDoc(doc(db, "rentals", rentalId), { status: "반환완료", returnedAt: serverTimestamp() });
-    await updateDoc(doc(db, "tls", tlId), { team: fromTeam, rentedFrom: null, isRented: false });
+    await updateDoc(doc(db, "tls", tlId), { isRented: false, rentedTo: null, rentReturnDate: null });
   }
 
-  // 자정 자동 반환 체크
+  // 자정 자동 반환 체크 (반환 날짜 지난 것)
   useEffect(() => {
     const today = new Date().toISOString().slice(0, 10);
-    rentals.filter(r => r.status === "대여중" && r.date < today).forEach(async r => {
+    rentals.filter(r => r.status === "대여중" && r.returnDate < today).forEach(async r => {
       await updateDoc(doc(db, "rentals", r.id), { status: "반환완료", returnedAt: serverTimestamp() });
-      await updateDoc(doc(db, "tls", r.tlId), { team: r.fromTeam, rentedFrom: null, isRented: false });
+      await updateDoc(doc(db, "tls", r.tlId), { isRented: false, rentedTo: null, rentReturnDate: null });
     });
   }, [rentals]);
 
@@ -392,7 +395,7 @@ export default function App() {
         {activeTab === "today" && <TodayScreen tls={tls} teams={teams} currentUser={currentUser} onToggle={toggleTodayUse} onPurpose={setTodayPurpose} onNotUsed={setNotUsedReason} workLogs={workLogs} />}
         {activeTab === "approval" && <ApprovalScreen approvals={approvals} tls={tls} onDecide={decideApproval} currentUser={currentUser} />}
         {activeTab === "rental" && <RentalScreen tls={tls} teams={teams} currentUser={currentUser} rentals={rentals} onRent={createRental} onReturn={returnRental} />}
-        {activeTab === "request" && <RequestScreen tls={tls} teams={teams} currentUser={currentUser} onSubmit={submitApproval} approvals={approvals} />}
+        {activeTab === "request" && <RequestScreen tls={tls} teams={teams} currentUser={currentUser} onSubmit={submitApproval} onCancel={cancelApproval} approvals={approvals} />}
         {activeTab === "teams" && <TeamsScreen teams={teams} tls={tls} accounts={accounts} onAdd={addTeam} onEdit={editTeam} onDelete={deleteTeam} onChangePw={changePassword} onAddDriver={addDriver} onDeleteAccount={deleteAccount} />}
         {activeTab === "history" && <HistoryScreen tls={tls} teams={teams} workLogs={workLogs} currentUser={currentUser} />}
         {activeTab === "driver" && <GuideScreen currentUser={currentUser} tls={tls} workLogs={workLogs} onStart={startWork} onEnd={endWork} />}
@@ -501,7 +504,12 @@ function LoginScreen({ accounts, onLogin }) {
                   <div style={{ fontSize: 11, color: "#aaa", fontWeight: 600, marginTop: 12, marginBottom: 4, paddingLeft: 2 }}>{g.label}</div>
                   {accs.map(a => (
                     <button key={a.id} className="group-btn" onClick={() => { setRoleId(a.id); setStep("login"); setErr(""); }}>
-                      {g.icon} {a.label || a.id} <span style={{ fontSize: 11, color: "#aaa", marginLeft: 4 }}>({roleLabel(a.role)})</span>
+                      {g.icon} {a.label || a.id}
+                      <span style={{ fontSize: 11, color: "#aaa", marginLeft: 4 }}>
+                        {(a.role === "guide" || a.role === "driver") && a.teamName
+                          ? `${a.teamName}`
+                          : roleLabel(a.role)}
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -1151,7 +1159,7 @@ function TLScreen({ tls, teams, currentUser, onAdd, onUpdate, onDelete }) {
                 </span>
               </div>
               <div className="card-meta">반입일: {t.inDate}{t.memo && " · " + t.memo}</div>
-              {t.isRented && <div className="alert alert-warn mb8" style={{padding:"6px 10px",fontSize:12}}>🔄 대여중 (원소유: {t.rentedFrom})</div>}
+              {t.isRented && <div className="alert alert-warn mb8" style={{padding:"6px 10px",fontSize:12}}>🔄 대여중 → {t.rentedTo}</div>}
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
                 {t.todayUse && <span className="pill pill-green">금일사용</span>}
                 {t.todayUse && t.todayPurpose && <span className="pill pill-purple">{t.todayPurpose}</span>}
@@ -1341,7 +1349,7 @@ function ApprovalCard({ approval: a, showBtn, onDecide, tls }) {
 }
 
 // ── 승인 요청 ─────────────────────────────────────────────────────────────
-function RequestScreen({ tls, teams, currentUser, onSubmit, approvals }) {
+function RequestScreen({ tls, teams, currentUser, onSubmit, onCancel, approvals }) {
   const [type, setType] = useState("이관");
   const [form, setForm] = useState({ tlId: "", to: "", reason: "", newSn: "", newSpec: "10m급", newLocation: "", newInDate: "" });
   const myTls = tls.filter(t => t.team === currentUser.team).sort((a,b) => (a.sn||"").localeCompare(b.sn||""));
@@ -1426,7 +1434,15 @@ function RequestScreen({ tls, teams, currentUser, onSubmit, approvals }) {
             <span className={`approval-type ${typeClass}`}>{a.type}</span>
             <div className="approval-title">{a.type === "반입" ? `신규 반입 · ${a.newSn}` : `${tlSn}${a.to ? " → " + a.to : ""}`}</div>
             <div className="approval-reason">{a.reason}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
             <span className={`pill ${a.status === "승인" ? "pill-green" : a.status === "반려" ? "pill-red" : "pill-amber"}`}>{a.status}</span>
+            {a.status === "대기" && (
+              <button className="btn btn-danger btn-sm" style={{ fontSize: 11, padding: "2px 10px" }}
+                onClick={() => { if (window.confirm("결재 요청을 철회하시겠습니까?")) onCancel(a.id); }}>
+                철회
+              </button>
+            )}
+          </div>
           </div>
         );
       })}
