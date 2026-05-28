@@ -1878,6 +1878,21 @@ function GuideScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
   const [scanSlot, setScanSlot] = useState(null); // null | 0 | 1
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState("");
+
+  // 체크리스트 모달
+  const [checkModal, setCheckModal] = useState(null);
+  // { type: "start"|"end", slotIdx, tlSn, tlId, tl, checks: [bool,bool,bool] }
+
+  const START_CHECKS = [
+    "작업 구역을 설정했습니까?",
+    "적재 하중을 준수했습니까?",
+    "작업 용도에 맞는 보호구를 착용했습니까?",
+  ];
+  const END_CHECKS = [
+    "키를 제거했습니까?",
+    "고임목을 설치했습니까?",
+    "주차 구역을 설정했습니까?",
+  ];
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const animRef = useRef(null);
@@ -2010,43 +2025,59 @@ function GuideScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
     const already = slots.some(s => s.active && s.tlId === tl.id);
     if (already) { alert(`${sn}은 이미 작업 중입니다.`); return; }
 
-    if (!window.confirm(`${sn} 작업을 시작하시겠습니까?\n위치: ${tl.floor ? tl.floor + " " : ""}${tl.location}`)) return;
-
-    const now = new Date();
-    const nowISO = now.toISOString();
-    const logId = await onStart(currentUser, tl.id, nowISO);
-
-    localStorage.setItem(slotKey(slotIdx), nowISO);
-    localStorage.setItem(snKey(slotIdx), sn);
-    localStorage.setItem(tlIdKey(slotIdx), tl.id);
-    if (logId) localStorage.setItem(logKey(slotIdx), logId);
-
-    setSlots(prev => prev.map((s, i) => i === slotIdx
-      ? { active: true, startTime: now, logId: logId || null, tlSn: sn, tlId: tl.id }
-      : s
-    ));
+    // 체크리스트 모달 열기
+    setCheckModal({
+      type: "start",
+      slotIdx,
+      tlSn: sn,
+      tlId: tl.id,
+      tl,
+      checks: [false, false, false],
+    });
   }
 
   // 작업 종료
   async function handleEnd(slotIdx) {
     const slot = slots[slotIdx];
     if (!slot.active || !slot.startTime) return;
-    if (!window.confirm(`${slot.tlSn} 작업을 종료하시겠습니까?`)) return;
+    // 체크리스트 모달 열기
+    setCheckModal({
+      type: "end",
+      slotIdx,
+      tlSn: slot.tlSn,
+      tlId: slot.tlId,
+      checks: [false, false, false],
+    });
+  }
 
+  async function confirmEnd(slotIdx) {
+    const slot = slots[slotIdx];
     const now = new Date();
     const durationMin = Math.round((now - slot.startTime) / 60000);
     const logId = slot.logId || workLogs.find(l => l.driverId === currentUser.id && l.tlId === slot.tlId && l.endedAt === null)?.id;
-
     localStorage.removeItem(slotKey(slotIdx));
     localStorage.removeItem(logKey(slotIdx));
     localStorage.removeItem(snKey(slotIdx));
     localStorage.removeItem(tlIdKey(slotIdx));
-
     setSlots(prev => prev.map((s, i) => i === slotIdx
       ? { active: false, startTime: null, logId: null, tlSn: "", tlId: null }
       : s
     ));
     if (logId) await onEnd(logId, slot.startTime.toISOString(), durationMin);
+  }
+
+  async function confirmStart(slotIdx, tl, sn) {
+    const now = new Date();
+    const nowISO = now.toISOString();
+    const logId = await onStart(currentUser, tl.id, nowISO);
+    localStorage.setItem(slotKey(slotIdx), nowISO);
+    localStorage.setItem(snKey(slotIdx), sn);
+    localStorage.setItem(tlIdKey(slotIdx), tl.id);
+    if (logId) localStorage.setItem(logKey(slotIdx), logId);
+    setSlots(prev => prev.map((s, i) => i === slotIdx
+      ? { active: true, startTime: now, logId: logId || null, tlSn: sn, tlId: tl.id }
+      : s
+    ));
   }
 
   const activeCount = slots.filter(s => s.active).length;
@@ -2069,6 +2100,121 @@ function GuideScreen({ currentUser, tls, workLogs, onStart, onEnd }) {
             {scanError && <div className="alert alert-warn" style={{ margin: 12 }}>{scanError}</div>}
             <div style={{ padding: 12 }}>
               <button className="btn full" onClick={stopScan}>취소</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 체크리스트 모달 */}
+      {checkModal && (
+        <div className="modal-bg">
+          <div className="modal" style={{ maxWidth: 380 }}>
+            <div className="modal-title" style={{ fontSize: 15 }}>
+              {checkModal.type === "start"
+                ? `✅ 작업 시작 전 확인 — ${checkModal.tl?.sn}`
+                : `✅ 작업 종료 전 확인 — ${checkModal.tlSn}`}
+            </div>
+            <div className="alert alert-info mb12" style={{ fontSize: 12 }}>
+              {checkModal.type === "start" ? "작업 시작 전" : "작업 종료 전"} 아래 항목을 모두 확인해주세요.
+            </div>
+            {(checkModal.type === "start" ? START_CHECKS : END_CHECKS).map((item, i) => (
+              <div key={i}
+                onClick={() => setCheckModal(prev => ({
+                  ...prev,
+                  checks: prev.checks.map((c, ci) => ci === i ? !c : c)
+                }))}
+                style={{
+                  display: "flex", alignItems: "center", gap: 12,
+                  padding: "12px 4px",
+                  borderBottom: i < 2 ? "1px solid #f0f0f0" : "none",
+                  cursor: "pointer",
+                }}>
+                <div style={{
+                  width: 24, height: 24, borderRadius: 6, flexShrink: 0,
+                  border: checkModal.checks[i] ? "none" : "2px solid #ccc",
+                  background: checkModal.checks[i] ? "#1D9E75" : "#fff",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  transition: "all 0.15s",
+                }}>
+                  {checkModal.checks[i] && <span style={{ color: "#fff", fontSize: 14, fontWeight: 700 }}>✓</span>}
+                </div>
+                <span style={{ fontSize: 14, fontWeight: 500, lineHeight: 1.4, color: checkModal.checks[i] ? "#1D9E75" : "#333" }}>
+                  {item}
+                </span>
+              </div>
+            ))}
+            <div className="btn-row" style={{ marginTop: 16 }}>
+              <button
+                className="btn btn-primary flex1"
+                disabled={!checkModal.checks.every(c => c)}
+                style={{ opacity: checkModal.checks.every(c => c) ? 1 : 0.4 }}
+                onClick={() => {
+                  if (checkModal.type === "start") confirmStart(checkModal.tl, checkModal.slotIdx);
+                  else confirmEnd(checkModal.slotIdx);
+                }}>
+                {checkModal.type === "start" ? "▶ 작업 시작" : "⏹ 작업 종료"}
+              </button>
+              <button className="btn flex1" onClick={() => setCheckModal(null)}>취소</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 체크리스트 모달 */}
+      {checkModal && (
+        <div className="modal-bg">
+          <div className="modal" style={{ maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
+            <div className="modal-title" style={{ color: checkModal.type === "start" ? "#534AB7" : "#E24B4A" }}>
+              {checkModal.type === "start" ? "✅ 작업 시작 전 확인" : "✅ 작업 종료 전 확인"}
+            </div>
+            <div className="alert alert-info mb12" style={{ fontSize: 13 }}>
+              {checkModal.tlSn} · 모든 항목을 확인해야 {checkModal.type === "start" ? "작업을 시작" : "작업을 종료"}할 수 있습니다.
+            </div>
+            <div style={{ flex: 1, overflowY: "auto" }}>
+              {(checkModal.type === "start" ? START_CHECKS : END_CHECKS).map((item, i) => (
+                <div key={i}
+                  onClick={() => setCheckModal(prev => ({
+                    ...prev,
+                    checks: prev.checks.map((c, ci) => ci === i ? !c : c)
+                  }))}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 12,
+                    padding: "14px 4px",
+                    borderBottom: i < 2 ? "1px solid #f0f0f0" : "none",
+                    cursor: "pointer",
+                  }}>
+                  <div style={{
+                    width: 26, height: 26, borderRadius: 6, border: "2px solid",
+                    borderColor: checkModal.checks[i] ? "#1D9E75" : "#ccc",
+                    background: checkModal.checks[i] ? "#1D9E75" : "#fff",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    flexShrink: 0, transition: "all 0.15s",
+                  }}>
+                    {checkModal.checks[i] && <span style={{ color: "#fff", fontSize: 16, fontWeight: 700 }}>✓</span>}
+                  </div>
+                  <span style={{ fontSize: 14, fontWeight: 500, color: checkModal.checks[i] ? "#1D9E75" : "#333" }}>
+                    {item}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
+              <button className="btn flex1" onClick={() => setCheckModal(null)}>취소</button>
+              <button
+                className="btn btn-primary flex1"
+                disabled={!checkModal.checks.every(Boolean)}
+                style={{ opacity: checkModal.checks.every(Boolean) ? 1 : 0.4 }}
+                onClick={async () => {
+                  const modal = checkModal;
+                  setCheckModal(null);
+                  if (modal.type === "start") {
+                    await confirmStart(modal.slotIdx, modal.tl, modal.tlSn);
+                  } else {
+                    await confirmEnd(modal.slotIdx);
+                  }
+                }}>
+                {checkModal.type === "start" ? "▶ 작업 시작" : "⏹ 작업 종료"}
+              </button>
             </div>
           </div>
         </div>
